@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TheroDev-Corp/cdn-manager/internal/auth"
 	"github.com/TheroDev-Corp/cdn-manager/internal/service"
 	"github.com/go-chi/chi/v5"
 	"go.yaml.in/yaml/v2"
@@ -25,6 +26,8 @@ func (missingSession) Web(*http.Request) (service.Actor, string, error) {
 func (missingSession) ValidCSRF(*http.Request, string, string) bool {
 	return false
 }
+
+func (missingSession) MCPConnection() auth.MCPConnection { return auth.MCPConnection{} }
 
 type operationContract struct {
 	ID          string `yaml:"operationId"`

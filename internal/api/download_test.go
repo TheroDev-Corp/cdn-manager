@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TheroDev-Corp/cdn-manager/internal/auth"
 	"github.com/TheroDev-Corp/cdn-manager/internal/service"
 	"github.com/TheroDev-Corp/cdn-manager/internal/storage"
 	"github.com/go-chi/chi/v5"
@@ -26,6 +27,8 @@ func (fixtureAuth) Web(*http.Request) (service.Actor, string, error) {
 func (fixtureAuth) ValidCSRF(_ *http.Request, expected, submitted string) bool {
 	return expected == submitted
 }
+
+func (fixtureAuth) MCPConnection() auth.MCPConnection { return auth.MCPConnection{} }
 
 func TestZIPRelativePathsAndCSRF(t *testing.T) {
 	s3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

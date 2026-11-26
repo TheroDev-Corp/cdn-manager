@@ -20,7 +20,8 @@ import (
 )
 
 const (
-	MetadataPath = "/.well-known/oauth-protected-resource/mcp"
+	MCPPath      = "/mcp"
+	MetadataPath = "/.well-known/oauth-protected-resource" + MCPPath
 	loginTTL     = 5 * time.Minute
 	defaultTTL   = 8 * time.Hour
 )
@@ -176,6 +177,25 @@ func (c identityClaims) actor(subject, client string) service.Actor {
 
 func (p *Provider) PublicURL() string { return p.publicURL }
 
+// MCPConnection contains the non-secret values needed to configure an MCP client.
+type MCPConnection struct {
+	URL         string   `json:"url"`
+	ClientID    string   `json:"clientId"`
+	Issuer      string   `json:"issuer"`
+	MetadataURL string   `json:"metadataUrl"`
+	Scopes      []string `json:"scopes"`
+}
+
+func (p *Provider) MCPConnection() MCPConnection {
+	return MCPConnection{
+		URL:         p.publicURL + MCPPath,
+		ClientID:    p.mcpAudience,
+		Issuer:      p.mcpIssuer,
+		MetadataURL: p.publicURL + MetadataPath,
+		Scopes:      slices.Clone(p.mcpScopes),
+	}
+}
+
 // AccessToken is a verified MCP access token reduced to application authorization data.
 type AccessToken struct {
 	Actor   service.Actor
@@ -267,7 +287,7 @@ func (p *Provider) Metadata(w http.ResponseWriter, _ *http.Request) {
 		AuthorizationServers   []string `json:"authorization_servers"`
 		BearerMethodsSupported []string `json:"bearer_methods_supported"`
 		ScopesSupported        []string `json:"scopes_supported"`
-	}{p.publicURL + "/mcp", []string{p.mcpIssuer}, []string{"header"}, p.mcpScopes})
+	}{p.publicURL + MCPPath, []string{p.mcpIssuer}, []string{"header"}, p.mcpScopes})
 }
 
 func sameToken(left, right string) bool {

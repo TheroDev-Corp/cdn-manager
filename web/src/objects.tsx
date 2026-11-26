@@ -23,6 +23,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
   const [busy, setBusy] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const folderInput = useRef<HTMLInputElement>(null)
+  const objectHeading = useRef<HTMLHeadingElement>(null)
   const queryClient = useQueryClient()
   const query = useInfiniteQuery({
     queryKey: ['objects', bucket, prefix],
@@ -43,6 +44,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
   })
   const visibleObjects = visible.filter(entry => !entry.folder).map(entry => entry.key)
   const allSelected = visibleObjects.length > 0 && visibleObjects.every(key => selected.includes(key))
+  const segments = prefix.split('/').slice(0, -1)
   const refresh = () => void queryClient.invalidateQueries({queryKey: ['objects', bucket]})
 
   function browse(next: string) {
@@ -51,6 +53,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
     setSelected([])
     setFailures([])
     setError(undefined)
+    objectHeading.current?.focus()
   }
 
   function addFiles(input: HTMLInputElement) {
@@ -60,13 +63,21 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
   }
 
   return <>
-    <div className="scope-head">
-      <div className="breadcrumbs" aria-label="Object prefix">
-        <button className="plain key" onClick={() => browse('')}>{bucket.bucket}</button>
-        {prefix.split('/').slice(0, -1).map((segment, index, segments) => {
-          const target = segments.slice(0, index + 1).join('/') + '/'
-          return <span key={target}><span aria-hidden="true"> / </span><button className="plain key" onClick={() => browse(target)}>{segment || '(empty)'}</button></span>
-        })}
+    <header className="title object-title">
+      <div>
+        <h1 ref={objectHeading} tabIndex={-1}>Objects</h1>
+        <nav className="breadcrumbs key" data-root={!prefix || undefined} aria-label="Object prefix">
+          {prefix ? <button className="plain" onClick={() => browse('')}>{bucket.bucket}</button> :
+            <span aria-current="location">{bucket.bucket}</span>}
+          {segments.map((segment, index) => {
+            const target = segments.slice(0, index + 1).join('/') + '/'
+            const label = segment || '(empty)'
+            return <span key={target}><span className="breadcrumb-divider" aria-hidden="true">/</span>
+              {target === prefix ? <span aria-current="location">{label}</span> :
+                <button className="plain" onClick={() => browse(target)}>{label}</button>}
+            </span>
+          })}
+        </nav>
       </div>
       <div className="actions">
         {source.capabilities.policy && <button onClick={() => setPolicy(true)}>Bucket policy</button>}
@@ -80,12 +91,12 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
           }} onChange={event => addFiles(event.currentTarget)} />
         </>}
       </div>
-    </div>
+    </header>
     <div className="table-toolbar">
-      <input type="search" aria-label="Filter loaded objects" placeholder="Filter loaded keys…" value={search} onChange={event => setSearch(event.target.value)} />
+      <div className="object-filter"><input type="search" aria-label="Filter loaded objects" placeholder="Filter loaded keys…" value={search} onChange={event => setSearch(event.target.value)} /></div>
       <div className="table-controls">
-        <span>{visible.length} of {entries.length} loaded</span>
-        <label>Sort <select value={sort} onChange={event => setSort(event.target.value)}>
+        <span className="object-count" aria-live="polite">{search ? `${visible.length} of ${entries.length} loaded` : `${entries.length} loaded`}</span>
+        <label>Sort <select aria-label="Sort objects" value={sort} onChange={event => setSort(event.target.value)}>
           <option value="name">Name</option><option value="modified">Newest</option><option value="size">Largest</option>
         </select></label>
         <button onClick={() => void query.refetch()} disabled={query.isFetching}>Refresh</button>
@@ -120,25 +131,28 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
     {query.error && <Failure error={query.error} retry={() => void query.refetch()} />}
     <table className="objects">
       <thead><tr>
-        <th className="select-col"><input type="checkbox" aria-label="Select all visible objects" checked={allSelected} disabled={visibleObjects.length === 0} onChange={event => {
+        <th className="select-col"><label className="object-check"><input type="checkbox" aria-label="Select all visible objects" checked={allSelected} disabled={visibleObjects.length === 0} onChange={event => {
           setSelected(event.target.checked ? [...new Set([...selected, ...visibleObjects])] : selected.filter(key => !visibleObjects.includes(key)))
-        }} /></th>
+        }} /></label></th>
         <th scope="col">Object key</th><th scope="col" className="numeric">Size</th><th scope="col" className="date-cell">Modified</th><th scope="col" className="row-actions">Link</th>
       </tr></thead>
       <tbody>{visible.map(entry => <tr key={(entry.folder ? 'prefix:' : 'object:') + entry.key}>
-        <td className="select-col">{!entry.folder && <input type="checkbox" aria-label={'Select ' + entry.key} checked={selected.includes(entry.key)} onChange={event => {
+        <td className="select-col">{!entry.folder && <label className="object-check"><input type="checkbox" aria-label={'Select ' + entry.key} checked={selected.includes(entry.key)} onChange={event => {
           setSelected(event.target.checked ? [...selected, entry.key] : selected.filter(key => key !== entry.key))
-        }} />}</td>
+        }} /></label>}</td>
         <td className="name-cell">
           <button onClick={() => entry.folder ? browse(entry.key) : setObject({...bucket, key: entry.key})} className="plain object-name" title={entry.key}>
             <span className={'object-icon ' + (entry.folder ? 'folder' : 'file')} aria-hidden="true" />
             <span className="key">{entry.key.slice(prefix.length) || entry.key}</span>
           </button>
-          {!entry.folder && <small className="mobile-date">{formatDate(entry.lastModified)}</small>}
+          {!entry.folder && <small className="mobile-meta">
+            <span className="mobile-size">{entry.size === undefined ? '—' : formatBytes(entry.size)} · </span>{formatDate(entry.lastModified)}
+          </small>}
         </td>
         <td className="numeric">{entry.folder || entry.size === undefined ? '—' : formatBytes(entry.size)}</td>
         <td className="date-cell">{formatDate(entry.lastModified)}</td>
-        <td className="row-actions">{!entry.folder && <button className="plain row-link" disabled={linkBusy !== ''} aria-label={'CDN link for ' + entry.key} onClick={async () => {
+        <td className="row-actions">{!entry.folder && <button className="plain row-link" aria-disabled={linkBusy !== ''} aria-busy={linkBusy === entry.key} aria-label={'CDN link for ' + entry.key} onClick={async () => {
+          if (linkBusy) return
           setLinkBusy(entry.key)
           setError(undefined)
           try {
@@ -146,7 +160,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
             setLink({key: entry.key, url: response.url})
           } catch (err) { setError(err) }
           finally { setLinkBusy('') }
-        }}>{linkBusy === entry.key ? 'Loading…' : 'CDN link ↗'}</button>}</td>
+        }}>{linkBusy === entry.key ? 'Loading…' : 'CDN link'}</button>}</td>
       </tr>)}</tbody>
     </table>
     {query.isPending && <div className="empty" role="status">Loading objects…</div>}
@@ -156,7 +170,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
         source.capabilities.upload && <button className="plain" onClick={() => fileInput.current?.click()}>Choose files to upload</button>}
     </div>}
     <footer className="table-foot">
-      <span>Filter and sort cover only loaded pages.</span>
+      {query.hasNextPage && <span>Filter and sort cover only loaded pages.</span>}
       {query.hasNextPage && <button disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>
         {query.isFetchingNextPage ? 'Loading…' : 'Load more'}
       </button>}

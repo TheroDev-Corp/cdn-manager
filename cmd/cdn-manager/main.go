@@ -172,7 +172,7 @@ func publicRoutes(backend *service.Backend, provider *auth.Provider, metrics *te
 	router.Post("/auth/logout", provider.Logout)
 	router.Get(auth.MetadataPath, provider.Metadata)
 	mcpServer := mcp.New(backend, provider)
-	router.Handle("/mcp", mcpServer)
+	router.Handle(auth.MCPPath, mcpServer)
 	router.Put(mcp.TransferPath, mcpServer.Transfer)
 	api.Mount(router, backend, provider)
 

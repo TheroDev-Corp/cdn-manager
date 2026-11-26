@@ -154,6 +154,29 @@ async function mcpClient(accessToken: string) {
   }
 }
 
+test('shows MCP connection values from the manager and protects the settings with SSO', async ({page, request}) => {
+  expect((await request.get('/api/v1/mcp-settings')).status()).toBe(401)
+  const deniedMcp = await request.get('/mcp')
+  expect(deniedMcp.status()).toBe(401)
+  const discoveryPath = '/.well-known/oauth-protected-resource/mcp'
+  expect(deniedMcp.headers()['www-authenticate']).toContain(baseURL + discoveryPath)
+  const discovery = await (await request.get(discoveryPath)).json()
+
+  await login(page, 'Owner')
+  const settingsRequest = page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/mcp-settings')
+  await page.getByRole('button', {name: 'MCP Settings', exact: true}).click()
+  const response = await settingsRequest
+  expect(response.status()).toBe(200)
+  expect(response.headers()['cache-control']).toBe('no-store')
+  expect(await response.json()).toEqual({
+    url: discovery.resource, clientId: 'demo-mcp', issuer: discovery.authorization_servers[0],
+    metadataUrl: baseURL + discoveryPath, scopes: discovery.scopes_supported,
+  })
+  const dialog = page.getByRole('dialog', {name: 'MCP Settings'})
+  await expect(dialog.getByLabel('MCP endpoint')).toHaveValue(discovery.resource)
+  await expect(dialog.getByLabel('Inspector command')).toHaveValue(/--client-id 'demo-mcp'.*list_sources/)
+})
+
 test('resumes a video across a manager restart and serves identical browser and MCP CDN links', async ({page, context, browser}, testInfo) => {
   test.setTimeout(160_000)
   await ready()

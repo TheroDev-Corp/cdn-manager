@@ -23,6 +23,27 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Session' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/mcp-settings:
+    get:
+      operationId: getMcpSettings
+      summary: Get the deployment's non-secret MCP connection settings
+      responses:
+        '200':
+          description: MCP connection settings for browser SSO with OAuth Authorization Code and PKCE
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url, clientId, issuer, metadataUrl, scopes]
+                properties:
+                  url: { type: string, format: uri }
+                  clientId: { type: string }
+                  issuer: { type: string, format: uri }
+                  metadataUrl: { type: string, format: uri }
+                  scopes:
+                    type: array
+                    items: { type: string, enum: [read, write, delete] }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /api/v1/sources:
     get:
       operationId: listSources

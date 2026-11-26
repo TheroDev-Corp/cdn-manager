@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { endpoint, HTTPError, type Capabilities, type Client, type ObjectRef, type TextObject } from './api'
 import { formatBytes, formatDate, isText } from './format'
 
@@ -11,12 +11,23 @@ export function Failure({error, retry}: {error: unknown; retry?: () => void}) {
   </div>
 }
 
-export function Modal({title, close, children}: {title: string; close: () => void; children: ReactNode}) {
-  return <dialog className="dialog" ref={node => { if (node && !node.open) node.showModal() }} onCancel={event => {
-    event.preventDefault()
+export function Modal({title, close, canClose, children}: {
+  title: string; close: () => void; canClose?: () => boolean; children: ReactNode
+}) {
+  const dialog = useRef<HTMLDialogElement>(null)
+  const dismiss = () => {
+    if (canClose && !canClose()) return
+    dialog.current?.close()
     close()
+  }
+  return <dialog className="dialog" ref={node => {
+    dialog.current = node
+    if (node && !node.open) node.showModal()
+  }} onCancel={event => {
+    event.preventDefault()
+    dismiss()
   }} aria-label={title}>
-    <header><h2>{title}</h2><button aria-label="Close" onClick={close}>×</button></header>
+    <header><h2>{title}</h2><button aria-label="Close" onClick={dismiss}>×</button></header>
     <div className="dialog-body">{children}</div>
   </dialog>
 }
@@ -57,9 +68,7 @@ export function ObjectDetail({object, capabilities, client, changed, close}: {
   const type = details?.contentType || ''
   const safeImage = /^image\/(?:png|jpeg|gif|webp|avif|bmp)(?:;|$)/i.test(type)
   const playable = /^(?:video|audio)\//i.test(type)
-  return <Modal title="Object details" close={() => {
-    if (!dirty || confirm('Discard your unsaved draft?')) close()
-  }}>
+  return <Modal title="Object details" close={close} canClose={() => !dirty || confirm('Discard your unsaved draft?')}>
     <p className="object-key key">{object.key}</p>
     <div className="detail-nav">
       <button aria-pressed={mode === 'details'} onClick={() => setMode('details')}>Details</button>

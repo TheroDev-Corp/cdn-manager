@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/TheroDev-Corp/cdn-manager/internal/auth"
 	"github.com/TheroDev-Corp/cdn-manager/internal/service"
 	"github.com/TheroDev-Corp/cdn-manager/internal/storage"
 	"github.com/aws/smithy-go"
@@ -17,6 +18,7 @@ import (
 type WebAuth interface {
 	Web(*http.Request) (service.Actor, string, error)
 	ValidCSRF(*http.Request, string, string) bool
+	MCPConnection() auth.MCPConnection
 }
 
 type API struct {
@@ -36,6 +38,7 @@ func Mount(router chi.Router, backend *service.Backend, auth WebAuth) {
 			})
 		})
 		router.Get("/session", a.session)
+		router.Get("/mcp-settings", a.handle(a.mcpSettings))
 		router.Get("/sources", a.handle(a.sources))
 		router.Get("/buckets", a.handle(a.buckets))
 		router.Post("/buckets", a.handle(a.changeBucket))
@@ -107,6 +110,11 @@ func (a *API) session(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) sources(w http.ResponseWriter, _ *http.Request, actor service.Actor) error {
 	writeJSON(w, http.StatusOK, map[string]any{"sources": a.backend.Sources(actor)})
+	return nil
+}
+
+func (a *API) mcpSettings(w http.ResponseWriter, _ *http.Request, _ service.Actor) error {
+	writeJSON(w, http.StatusOK, a.auth.MCPConnection())
 	return nil
 }
 

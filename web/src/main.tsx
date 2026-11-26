@@ -1,13 +1,15 @@
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import '@fontsource/ibm-plex-sans/latin-400.css'
 import '@fontsource/ibm-plex-sans/latin-500.css'
 import '@fontsource/ibm-plex-sans/latin-600.css'
-import '@fontsource/ibm-plex-mono/latin-400.css'
-import '@fontsource/ibm-plex-mono/cyrillic-400.css'
+import '@fontsource/jetbrains-mono/latin-400.css'
+import '@fontsource/jetbrains-mono/cyrillic-400.css'
+import '@fontsource/unbounded/latin-600.css'
 import { api, HTTPError, type Session } from './api'
 import { Failure, Modal } from './detail'
+import { MCPSettings } from './mcp-settings'
 import { Objects } from './objects'
 import { Transfers, useTransfers } from './transfers'
 import './styles.css'
@@ -43,6 +45,8 @@ function Workspace({session}: {session: Session}) {
   const [sourceID, selectSource] = useState('')
   const [bucketName, selectBucket] = useState('')
   const [tab, setTab] = useState<'objects' | 'transfers'>('objects')
+  const [mcpSettings, setMcpSettings] = useState(false)
+  const transferTab = useRef<HTMLButtonElement>(null)
   const [create, setCreate] = useState(false)
   const [newBucket, setNewBucket] = useState('')
   const [error, setError] = useState<unknown>()
@@ -58,12 +62,21 @@ function Workspace({session}: {session: Session}) {
     void cache.invalidateQueries({queryKey: ['objects', {source: object.source, bucket: object.bucket}]})
   })
   const unfinished = transfers.rows.filter(row => row.status !== 'complete').length
+  const sourceHealth = source?.health === 'healthy' ? 'Available' : source?.health === 'unavailable' ? 'Unavailable' : ''
   const reloadBuckets = async () => { await cache.invalidateQueries({queryKey: ['buckets', source?.id]}) }
   return <div className="app-frame">
+    <a className="skip-link" href="#workspace">Skip to workspace</a>
     <header className="topbar">
       <Brand />
+      <nav className="tabs" aria-label="Workspace views">
+        <button aria-current={tab === 'objects' ? 'page' : undefined} onClick={() => setTab('objects')}>Objects</button>
+        <button ref={transferTab} aria-current={tab === 'transfers' ? 'page' : undefined}
+          aria-label={unfinished ? `Transfers, ${unfinished} unfinished` : undefined} onClick={() => setTab('transfers')}>
+          Transfers{unfinished > 0 && <span className="tab-count" aria-hidden="true">{unfinished}</span>}
+        </button>
+      </nav>
       <div className="account">
-        <span title={session.name || session.subject}>{session.name || session.subject}</span>
+        <span className="account-name" title={session.name || session.subject}>{session.name || session.subject}</span>
         <button onClick={async () => {
           if (unfinished && !confirm('Sign out? Active transfers will pause and can be resumed when you sign back in.')) return
           try {
@@ -71,6 +84,9 @@ function Workspace({session}: {session: Session}) {
             window.location.assign('/')
           } catch (err) { setError(err) }
         }}>Sign out</button>
+        <button className="mcp-trigger" aria-label="MCP Settings" aria-haspopup="dialog" onClick={() => setMcpSettings(true)}>
+          MCP<span className="mcp-label"> Settings</span>
+        </button>
       </div>
     </header>
     <aside className="sources" aria-label="Storage scope">
@@ -87,7 +103,10 @@ function Workspace({session}: {session: Session}) {
             {item.label || item.id}{item.health === 'unavailable' ? ' (unavailable)' : ''}
           </option>)}
         </select>
-        {source?.region && <span className="source-region key">{source.region}</span>}
+        {source && (source.region || sourceHealth) && <div className="source-meta">
+          {source.region && <span className="key" title="Region">{source.region}</span>}
+          {sourceHealth && <span className="source-health" data-health={source.health}>{sourceHealth}</span>}
+        </div>}
       </div>
       <div className="scope-group">
         <label htmlFor="bucket-select">Bucket</label>
@@ -112,17 +131,14 @@ function Workspace({session}: {session: Session}) {
         </div>
       </div>
     </aside>
-    <main className="sheet">
-      <header className="title">
-        <h1>{tab === 'objects' ? 'Objects' : 'Transfers'}</h1>
-      </header>
-      <nav className="tabs" aria-label="Workspace views">
-        <button aria-current={tab === 'objects' ? 'page' : undefined} onClick={() => setTab('objects')}>Objects</button>
-        <button aria-current={tab === 'transfers' ? 'page' : undefined} onClick={() => setTab('transfers')}>Transfers{unfinished > 0 && <span className="tab-count">{unfinished}</span>}</button>
-      </nav>
+    <main className="sheet" id="workspace" tabIndex={-1}>
       {!create && error !== undefined && <Failure error={error} />}
-      {tab === 'transfers' && <Transfers transfers={transfers} />}
+      {tab === 'transfers' && <>
+        <header className="title"><h1>Transfers</h1></header>
+        <Transfers transfers={transfers} />
+      </>}
       <section hidden={tab !== 'objects'} aria-label="Objects">
+        {(!source || !activeBucket) && <header className="title"><h1>Objects</h1></header>}
         {source?.health === 'unavailable' && <p className="feedback error" role="status">
           {source.label || source.id} is unavailable. You can switch to another source.
         </p>}
@@ -134,12 +150,16 @@ function Workspace({session}: {session: Session}) {
         {source && activeBucket && <Objects
           key={JSON.stringify([source.id, activeBucket.name])} source={source} bucket={{source: source.id, bucket: activeBucket.name}}
           client={client} csrfToken={session.csrfToken} enqueue={entries => {
-            transfers.enqueue(entries, !source.capabilities.multipart)
-            setTab('transfers')
+            if (entries.length) {
+              transfers.enqueue(entries, !source.capabilities.multipart)
+              setTab('transfers')
+              transferTab.current?.focus()
+            }
           }}
         />}
       </section>
     </main>
+    {mcpSettings && <MCPSettings close={() => setMcpSettings(false)} />}
     {create && source && <Modal title="Create bucket" close={() => {setError(undefined); setCreate(false)}}>
       <form className="bucket-form" onSubmit={async event => {
         event.preventDefault()

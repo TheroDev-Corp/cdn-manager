@@ -3,10 +3,11 @@ import { createHash, generateKeyPairSync, randomUUID, sign, timingSafeEqual } fr
 
 const issuer = 'http://127.0.0.1:5556'
 const manager = 'http://127.0.0.1:8080'
+const inspectorCallback = 'http://127.0.0.1:6276/oauth/callback'
 const clients = {
-  'demo-web': { redirect: manager + '/auth/callback', secret: 'only-for-local-demo' },
-  'demo-mcp': { redirect: issuer + '/mcp-callback' },
-  'demo-other-mcp': { redirect: issuer + '/mcp-callback' },
+  'demo-web': { redirects: [manager + '/auth/callback'], secret: 'only-for-local-demo' },
+  'demo-mcp': { redirects: [issuer + '/mcp-callback', inspectorCallback] },
+  'demo-other-mcp': { redirects: [issuer + '/mcp-callback'] },
 }
 const users = Object.freeze({
   owner: { name: 'Demo Owner', groups: ['demo-admins'] },
@@ -38,7 +39,7 @@ function createAuthorization(params) {
   const redirect = params.get('redirect_uri')
   const scope = params.get('scope') ?? ''
   const challenge = params.get('code_challenge') ?? ''
-  if (!settings || settings.redirect !== redirect || params.get('response_type') !== 'code' ||
+  if (!settings || !settings.redirects.includes(redirect) || params.get('response_type') !== 'code' ||
       params.get('code_challenge_method') !== 'S256' || !/^[A-Za-z0-9_-]{43}$/.test(challenge) ||
       !scope.split(/ +/).every(value => scopes.includes(value))) {
     return new Response('Invalid demo authorization request', { status: 400 })
@@ -51,7 +52,7 @@ function createAuthorization(params) {
     '<!doctype html><html lang="en"><meta charset="utf-8"><title>Demo sign-in</title>' +
       '<main><h1>Choose a demo account</h1><form method="post">' +
       '<input type="hidden" name="flow" value="' + id + '">' + buttons + '</form></main></html>',
-    { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'; form-action 'self' http://127.0.0.1:8080" } },
+    { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': `default-src 'none'; form-action 'self' ${manager} ${inspectorCallback}` } },
   )
 }
 
@@ -111,6 +112,7 @@ Bun.serve({
     const url = new URL(request.url)
     switch (url.pathname) {
       case '/health': return new Response('OK')
+      case '/.well-known/oauth-authorization-server':
       case '/.well-known/openid-configuration':
         return Response.json({
           issuer,
@@ -118,6 +120,7 @@ Bun.serve({
           token_endpoint: issuer + '/token',
           jwks_uri: issuer + '/jwks',
           response_types_supported: ['code'],
+          grant_types_supported: ['authorization_code'],
           subject_types_supported: ['public'],
           id_token_signing_alg_values_supported: ['RS256'],
           token_endpoint_auth_methods_supported: ['client_secret_basic', 'none'],
