@@ -1,0 +1,856 @@
+openapi: 3.1.0
+info:
+  title: CDN Manager REST API
+  version: 0.1.0
+  description: |
+    Browser session authentication starts at /auth/login. Use GET /api/v1/session
+    to obtain the CSRF token. The API authorizes every operation against the
+    selected source, bucket allowlist, provider capabilities, and role.
+    All source, bucket, key, and version selectors are case-sensitive.
+servers:
+  - url: /
+security:
+  - webSession: []
+paths:
+  /api/v1/session:
+    get:
+      operationId: getSession
+      summary: Get the signed-in browser session and its CSRF token
+      responses:
+        '200':
+          description: Current session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/sources:
+    get:
+      operationId: listSources
+      summary: List visible sources with effective capabilities and latest health
+      responses:
+        '200':
+          description: Sources visible to the caller
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sources]
+                properties:
+                  sources:
+                    type: array
+                    items: { $ref: '#/components/schemas/Source' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/buckets:
+    parameters:
+      - $ref: '#/components/parameters/Source'
+    get:
+      operationId: listBuckets
+      summary: List existing buckets in the source allowlist
+      responses:
+        '200':
+          description: Visible buckets
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [buckets]
+                properties:
+                  buckets:
+                    type: array
+                    items:
+                      type: object
+                      required: [name]
+                      properties:
+                        name: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    post:
+      operationId: createBucket
+      summary: Create a bucket already configured in the allowlist
+      security:
+        - webSession: []
+          csrfHeader: []
+      parameters:
+        - $ref: '#/components/parameters/Bucket'
+      responses:
+        '204': { description: Created }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    delete:
+      operationId: deleteBucket
+      summary: Delete an empty bucket in the allowlist
+      security:
+        - webSession: []
+          csrfHeader: []
+      parameters:
+        - $ref: '#/components/parameters/Bucket'
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/bucket-policy:
+    parameters: &bucketSelectors
+      - $ref: '#/components/parameters/Source'
+      - $ref: '#/components/parameters/Bucket'
+    get:
+      operationId: getBucketPolicy
+      summary: Read the configured bucket policy
+      responses:
+        '200':
+          description: Policy JSON encoded as a string, or an empty string when no policy exists
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Policy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    put:
+      operationId: putBucketPolicy
+      summary: Replace the bucket policy
+      security:
+        - webSession: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Policy' }
+      responses:
+        '204': { description: Policy saved }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    delete:
+      operationId: deleteBucketPolicy
+      summary: Remove the bucket policy
+      security:
+        - webSession: []
+          csrfHeader: []
+      responses:
+        '204': { description: Policy removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/objects:
+    parameters: *bucketSelectors
+    get:
+      operationId: listObjects
+      summary: List objects and direct child prefixes in storage order
+      description: The browser filters and sorts the pages it has loaded.
+      parameters:
+        - name: prefix
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: One page of keys and child prefixes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [objects, prefixes]
+                properties:
+                  objects:
+                    type: array
+                    items: { $ref: '#/components/schemas/Object' }
+                  prefixes:
+                    type: array
+                    items: { type: string }
+                  nextCursor: { type: string }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/object:
+    parameters: &objectSelectors
+      - $ref: '#/components/parameters/Source'
+      - $ref: '#/components/parameters/Bucket'
+      - $ref: '#/components/parameters/Key'
+    get:
+      operationId: statObject
+      summary: Read an object's system and user metadata
+      parameters:
+        - $ref: '#/components/parameters/VersionID'
+      responses:
+        '200': { $ref: '#/components/responses/Object' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    put:
+      operationId: putObject
+      summary: Upload or replace one object up to 64 MiB
+      description: Set Content-Length to the exact payload length and Content-Type to the object media type. Use multipart for larger objects.
+      security:
+        - webSession: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          '*/*':
+            schema: { $ref: '#/components/schemas/Binary' }
+      responses:
+        '201': { $ref: '#/components/responses/Object' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    delete:
+      operationId: deleteObject
+      summary: Delete an object or a specific version
+      security:
+        - webSession: []
+          csrfHeader: []
+      parameters:
+        - $ref: '#/components/parameters/VersionID'
+      responses:
+        '204': { description: Deletion processed }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/delete:
+    parameters: *bucketSelectors
+    post:
+      operationId: deleteObjects
+      summary: Delete a selection of objects with an outcome per key
+      security:
+        - webSession: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Selection' }
+      responses:
+        '200':
+          description: Results in input order. An absent error means success for that key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [key]
+                      properties:
+                        key: { type: string }
+                        error: { type: string }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/cdn-url:
+    parameters: *objectSelectors
+    get:
+      operationId: getCDNURL
+      summary: Generate the permanent public URL for the configured object route
+      description: This does not contact S3 or the gateway. Availability is verified independently using the public URL.
+      responses:
+        '200': { $ref: '#/components/responses/URL' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+  /api/v1/cdn-status:
+    parameters: *objectSelectors
+    get:
+      operationId: checkCDNStatus
+      summary: Check the configured CDN route from the manager network
+      description: The check is independent of S3 access. It sends an anonymous HEAD request with a five-second total budget, falls back to a one-byte range request when HEAD is unsupported, and does not follow redirects.
+      responses:
+        '200':
+          description: Availability at the configured gateway from this manager. The HTTP status is present if the gateway responded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [available]
+                properties:
+                  available: { type: boolean }
+                  status: { type: integer, minimum: 100, maximum: 599 }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '429': { $ref: '#/components/responses/Busy' }
+  /api/v1/presign:
+    parameters: *objectSelectors
+    post:
+      operationId: createPresignedURL
+      summary: Generate a time-limited S3 download URL
+      description: The recipient needs network access to the signed S3 host. Treat the resulting URL as a credential.
+      security:
+        - webSession: []
+          csrfHeader: []
+      parameters:
+        - $ref: '#/components/parameters/VersionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ttlSeconds]
+              properties:
+                ttlSeconds: { type: integer, minimum: 1, maximum: 604800 }
+      responses:
+        '200': { $ref: '#/components/responses/URL' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/text:
+    parameters: *objectSelectors
+    get:
+      operationId: readText
+      summary: Read a UTF-8 object up to 1 MiB
+      responses:
+        '200':
+          description: Object metadata, text, and edit limit in bytes
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Object'
+                  - type: object
+                    required: [text, maxBytes]
+                    properties:
+                      text: { type: string }
+                      maxBytes: { type: integer, const: 1048576 }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    put:
+      operationId: writeText
+      summary: Atomically save UTF-8 text against its prior ETag
+      security:
+        - webSession: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text, etag]
+              properties:
+                text: { type: string }
+                etag:
+                  type: string
+                  description: ETag exactly as returned by the server, including its quotes.
+                contentType: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/Object' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/versions:
+    parameters: *objectSelectors
+    get:
+      operationId: listVersions
+      summary: List versions and delete markers for a single exact key
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Page of versions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/Object'
+                        - type: object
+                          required: [id, isLatest, deleteMarker]
+                          properties:
+                            id: { type: string }
+                            isLatest: { type: boolean }
+                            deleteMarker: { type: boolean }
+                  nextCursor: { type: string }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/download:
+    parameters: &downloadSelectors
+      - $ref: '#/components/parameters/Source'
+      - $ref: '#/components/parameters/Bucket'
+      - $ref: '#/components/parameters/Key'
+      - $ref: '#/components/parameters/VersionID'
+      - $ref: '#/components/parameters/Range'
+    get:
+      operationId: downloadObject
+      summary: Stream an object as a binary attachment
+      responses:
+        '200': { $ref: '#/components/responses/Attachment' }
+        '206': { $ref: '#/components/responses/PartialAttachment' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '416': { $ref: '#/components/responses/RangeInvalid' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    head:
+      operationId: headDownload
+      summary: Get the headers of an object attachment
+      responses: &headResponses
+        '200':
+          description: Object headers
+          headers:
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+            Content-Length: { schema: { type: integer, format: int64 } }
+        '206':
+          description: Partial object headers
+          headers:
+            Content-Range: { schema: { type: string } }
+        '400': { description: Invalid request }
+        '401': { description: Browser session required }
+        '404': { description: Resource is missing or hidden }
+        '416': { description: Unsatisfiable range }
+        '422': { description: Unsupported operation }
+        '502': { description: Storage request failed }
+  /api/v1/preview:
+    parameters: *downloadSelectors
+    get:
+      operationId: previewObject
+      summary: Stream an allowlisted raster image, audio, or video with sandbox headers
+      responses:
+        '200': { $ref: '#/components/responses/Preview' }
+        '206': { $ref: '#/components/responses/PartialPreview' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '416': { $ref: '#/components/responses/RangeInvalid' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    head:
+      operationId: headPreview
+      summary: Get the headers of a safe object preview
+      responses: *headResponses
+  /api/v1/zip:
+    parameters: *bucketSelectors
+    post:
+      operationId: downloadZIP
+      summary: Stream selected objects as one ZIP archive
+      description: Send the session CSRF token in the header for JSON or in the csrfToken field for a native form submission.
+      security:
+        - webSession: []
+          csrfHeader: []
+        - webSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Selection' }
+          application/x-www-form-urlencoded:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/Selection'
+                - type: object
+                  required: [csrfToken]
+                  properties:
+                    csrfToken: { type: string }
+            encoding:
+              keys: { style: form, explode: true }
+      responses:
+        '200':
+          description: ZIP stream. An upstream error after streaming starts terminates the transfer.
+          headers:
+            Content-Disposition: { schema: { type: string } }
+          content:
+            application/zip:
+              schema: { $ref: '#/components/schemas/Binary' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/uploads:
+    parameters: *objectSelectors
+    post:
+      operationId: startUpload
+      summary: Start an expiring multipart upload for the current subject
+      security:
+        - webSession: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [size]
+              properties:
+                size: { type: integer, format: int64, minimum: 1, maximum: 671088640000 }
+                contentType: { type: string }
+      responses:
+        '201': { $ref: '#/components/responses/Upload' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/TooLarge' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/uploads/{id}:
+    parameters: &uploadSelector
+      - $ref: '#/components/parameters/UploadID'
+    get:
+      operationId: getUpload
+      summary: Reconcile a subject-owned upload with the parts held in S3
+      responses:
+        '200': { $ref: '#/components/responses/Upload' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+    delete:
+      operationId: abortUpload
+      summary: Abort an unfinished upload and remove the upload session
+      security:
+        - webSession: []
+          csrfHeader: []
+      responses:
+        '204': { description: Upload aborted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/uploads/{id}/parts/{number}:
+    parameters:
+      - $ref: '#/components/parameters/UploadID'
+      - name: number
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1, maximum: 10000 }
+    put:
+      operationId: putUploadPart
+      summary: Upload or retry a numbered part
+      description: Send one raw part with an exact Content-Length. The part size is taken from the upload session and its remaining bytes.
+      security:
+        - webSession: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { $ref: '#/components/schemas/Binary' }
+      responses:
+        '200':
+          description: Part accepted by S3
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Part' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/uploads/{id}/complete:
+    parameters: *uploadSelector
+    post:
+      operationId: completeUpload
+      summary: Complete a multipart upload or return its recorded completion
+      security:
+        - webSession: []
+          csrfHeader: []
+      responses:
+        '200': { $ref: '#/components/responses/Object' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unsupported' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '502': { $ref: '#/components/responses/GatewayError' }
+components:
+  securitySchemes:
+    webSession:
+      type: apiKey
+      in: cookie
+      name: __Host-cdn-manager-session
+      description: Issued after the browser OIDC flow. Explicit HTTP loopback development uses cdn-manager-session.
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: Token returned by GET /api/v1/session.
+  parameters:
+    Source:
+      name: source
+      in: query
+      required: true
+      schema: { type: string }
+    Bucket:
+      name: bucket
+      in: query
+      required: true
+      schema: { type: string }
+    Key:
+      name: key
+      in: query
+      required: true
+      description: Use the exact key as a query value before URL encoding. The UTF-8 form is limited to 1024 bytes.
+      schema: { type: string, minLength: 1, maxLength: 1024 }
+    VersionID:
+      name: versionId
+      in: query
+      schema: { type: string }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque nextCursor from the same listing, if present.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    Range:
+      name: Range
+      in: header
+      description: A single byte range forwarded to S3.
+      schema: { type: string }
+      example: bytes=0-4095
+    UploadID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[A-Z2-7]{26}$' }
+  responses:
+    Unauthorized:
+      description: A current web session is required.
+      content: &errorContent
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Invalid:
+      description: The request contains an invalid value.
+      content: *errorContent
+    Forbidden:
+      description: The CSRF token or the permission required by this operation was missing.
+      content: *errorContent
+    NotFound:
+      description: The resource was missing, inaccessible to the caller, or an unfinished upload expired.
+      content: *errorContent
+    Conflict:
+      description: The object revision, bucket, or upload state conflicted with the operation.
+      content: *errorContent
+    TooLarge:
+      description: The body, object, or requested upload exceeds the size limit.
+      content: *errorContent
+    RangeInvalid:
+      description: The requested range is outside the object.
+      content: *errorContent
+    Unsupported:
+      description: The source or object does not support the requested operation.
+      content: *errorContent
+    Busy:
+      description: The server or upload is busy. The request can be retried.
+      headers:
+        Retry-After: { schema: { type: integer, const: 2 } }
+      content: *errorContent
+    GatewayError:
+      description: The storage operation could not be completed.
+      content: *errorContent
+    URL:
+      description: Generated URL
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [url]
+            properties:
+              url: { type: string, format: uri }
+    Object:
+      description: Object metadata
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Object' }
+    Upload:
+      description: Multipart session and any known parts
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Upload' }
+    Attachment:
+      description: Binary object attachment
+      headers:
+        Content-Disposition: { schema: { type: string } }
+        Accept-Ranges: { schema: { type: string, const: bytes } }
+      content: &binaryContent
+        application/octet-stream:
+          schema: { $ref: '#/components/schemas/Binary' }
+    PartialAttachment:
+      description: Requested byte range of the object attachment
+      headers:
+        Content-Disposition: { schema: { type: string } }
+        Content-Range: { schema: { type: string } }
+        Accept-Ranges: { schema: { type: string, const: bytes } }
+      content: *binaryContent
+    Preview:
+      description: Displayable raster image, audio, or video
+      headers:
+        Content-Security-Policy: { schema: { type: string } }
+        Accept-Ranges: { schema: { type: string, const: bytes } }
+      content: &mediaContent
+        'image/*':
+          schema: { $ref: '#/components/schemas/Binary' }
+        'audio/*':
+          schema: { $ref: '#/components/schemas/Binary' }
+        'video/*':
+          schema: { $ref: '#/components/schemas/Binary' }
+    PartialPreview:
+      description: Requested byte range of the preview
+      headers:
+        Content-Range: { schema: { type: string } }
+        Content-Security-Policy: { schema: { type: string } }
+        Accept-Ranges: { schema: { type: string, const: bytes } }
+      content: *mediaContent
+  schemas:
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+    Binary:
+      type: string
+      format: binary
+    Session:
+      type: object
+      required: [subject, name, csrfToken]
+      properties:
+        subject: { type: string }
+        name: { type: string }
+        csrfToken: { type: string }
+    Source:
+      type: object
+      required: [id, region, capabilities, health]
+      properties:
+        id: { type: string }
+        label: { type: string }
+        region: { type: string }
+        health: { type: string, enum: [unknown, healthy, unavailable] }
+        capabilities:
+          type: object
+          properties:
+            upload: { type: boolean }
+            multipart: { type: boolean }
+            metadata: { type: boolean }
+            versions: { type: boolean }
+            editText: { type: boolean }
+            createBucket: { type: boolean }
+            deleteBucket: { type: boolean }
+            policy: { type: boolean }
+            presign: { type: boolean }
+            delete: { type: boolean }
+    Object:
+      type: object
+      required: [key, size]
+      properties:
+        key: { type: string }
+        size: { type: integer, format: int64 }
+        etag: { type: string }
+        versionId: { type: string }
+        contentType: { type: string }
+        contentRange: { type: string }
+        lastModified: { type: string, format: date-time }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+    Policy:
+      type: object
+      required: [policy]
+      properties:
+        policy:
+          type: string
+          description: The policy document as JSON text. A successful read can return an empty string.
+    Selection:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { type: string, minLength: 1, maxLength: 1024 }
+    Upload:
+      type: object
+      required: [id, source, bucket, key, size, partSize, partCount, expiresAt, parts, status]
+      properties:
+        id: { type: string }
+        source: { type: string }
+        bucket: { type: string }
+        key: { type: string }
+        contentType: { type: string }
+        size: { type: integer, format: int64 }
+        partSize: { type: integer, format: int64 }
+        partCount: { type: integer }
+        expiresAt: { type: string, format: date-time }
+        parts:
+          type: array
+          items: { $ref: '#/components/schemas/Part' }
+        result: { $ref: '#/components/schemas/Object' }
+        status: { type: string, enum: [active, completed] }
+    Part:
+      type: object
+      required: [number, etag, size]
+      properties:
+        number: { type: integer, minimum: 1, maximum: 10000 }
+        etag: { type: string }
+        size: { type: integer, format: int64 }

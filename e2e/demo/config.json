@@ -1,0 +1,42 @@
+{
+  "auth": {
+    "publicUrl": "http://127.0.0.1:8080",
+    "oidcIssuer": "http://127.0.0.1:5556",
+    "oidcClientId": "demo-web",
+    "oidcClientSecretEnv": "DEMO_OIDC_SECRET",
+    "mcpIssuer": "http://127.0.0.1:5556",
+    "mcpAudience": "demo-mcp",
+    "mcpScopes": ["read", "write"],
+    "allowInsecureLocalhost": true
+  },
+  "sources": [
+    {
+      "id": "assets",
+      "label": "Assets",
+      "endpoint": "http://garage:3900",
+      "region": "example",
+      "buckets": ["assets"],
+      "pathStyle": true,
+      "cdnUrl": "http://localhost:8081/{key}",
+      "cdnProbeUrl": "http://cdn/{key}",
+      "accessKeyEnv": "DEMO_ACCESS_KEY",
+      "secretKeyEnv": "DEMO_SECRET_KEY",
+      "roles": {"viewer": ["demo-viewers"], "editor": ["demo-editors"], "admin": ["demo-admins"]},
+      "capabilities": {}
+    },
+    {
+      "id": "media",
+      "label": "Media",
+      "endpoint": "http://garage:3900",
+      "region": "example",
+      "buckets": ["videos"],
+      "pathStyle": true,
+      "cdnUrl": "http://localhost:8081/media/{key}",
+      "cdnProbeUrl": "http://cdn/media/{key}",
+      "accessKeyEnv": "DEMO_ACCESS_KEY",
+      "secretKeyEnv": "DEMO_SECRET_KEY",
+      "roles": {"editor": ["demo-editors"], "admin": ["demo-admins"]},
+      "capabilities": {"multipart": true}
+    }
+  ]
+}

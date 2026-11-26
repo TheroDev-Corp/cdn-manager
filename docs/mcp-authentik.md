@@ -1,0 +1,23 @@
+# Connect MCP Inspector through Authentik
+
+Use a dedicated Authentik OAuth2/OpenID provider and application for the MCP endpoint. The browser UI uses a separate confidential provider. Enable the Authorization Code grant explicitly on both providers. Set both providers to the same stable Subject Mode, such as hashed user ID, so the same user can resume an upload from either interface. Select an asymmetric signing key and enable inclusion of scope claims in tokens. [Authentik OAuth2 provider](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/)
+
+1. For the UI provider, register the exact HTTPS callback `https://manager.example.com/auth/callback`. The manager requests `openid profile`. Make sure the signed ID token contains `groups` as an array of strings, using a scope mapping on `profile`.
+2. For the MCP provider, use a public client with Authorization Code and S256 PKCE. Register the exact Inspector callback `http://127.0.0.1:6276/oauth/callback`. Bind the application to the intended user groups. Create a `read` scope mapping that returns the `groups` claim in the signed access token. Add `write` and `delete` mappings only when those MCP operations are needed. Restrict sensitive scopes with an Authentik application policy as appropriate. [Authentik scope mappings](https://docs.goauthentik.io/add-secure-apps/providers/property-mappings/)
+3. In the manager configuration, set `auth.mcpIssuer` to the MCP provider's issuer exactly as advertised in its OIDC discovery document, including any trailing slash. Set `auth.mcpAudience` to the dedicated MCP client ID that Authentik puts in `aud`. List enabled scopes in `auth.mcpScopes`, for example `["read", "write"]`. `auth.publicUrl` supplies the MCP resource URL and callback origin. [MCP audience binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization#token-handling)
+
+Run Inspector with its pre-registered client ID and sign in when it opens the browser. The CLI needs a Node.js version supported by Inspector. The example uses the current MCP protocol with HTTP scope challenges. [MCP Inspector authorization walkthrough](https://modelcontextprotocol.io/docs/tutorials/security/authorization)
+
+```bash
+npx @modelcontextprotocol/inspector@2.16.0 --cli https://manager.example.com/mcp \
+  --transport http --protocol-era modern --client-id example-cdn-mcp \
+  --method tools/call --tool-name list_sources
+```
+
+Compare the listed sources to the UI for the same Authentik account. `get_cdn_url` takes `source`, `bucket`, and `key`. Its `url` should match the permanent URL shown by the UI. A client holding only `read` receives an `insufficient_scope` challenge when it requests a write operation. Even after obtaining `write`, the account needs an editor or admin role for the source. `delete_object` also requires the `delete` scope and an admin role. Source grants may differ between sources.
+
+The Inspector command was exercised with Authentik 2026.8.7, Inspector 2.16.0, and Node.js 24.22.1 on Ubuntu WSL2. Run it in a terminal so Inspector can prompt for the browser handoff. The local test used explicit loopback HTTP configuration. The example above uses HTTPS for the manager.
+
+Use `start_upload` with the target `source`, `bucket`, `key`, and byte `size`, then call `grant_upload_part` with the returned `id` and a part `number`. Send that part as a raw body to the returned URL with `PUT` and the exact `Authorization` and `Content-Length` values from the result. Treat the authorization value as a credential and keep it out of command history and logs. It can retry the same part until expiry, at most five minutes. If it expires, request a new grant. Run `upload_status` after reconnecting and `complete_upload` once all parts are present. An application restart expires browser sessions and part grants. Sign in again if needed and use the durable upload session ID to continue.
+
+If authentication fails, inspect the actual provider's discovery metadata for `S256` in `code_challenge_methods_supported`. Compare the returned access token's issuer and audience to the manager configuration and verify that it contains the expected `scope` and `groups` claims. Use `--relogin` when changing Inspector's cached authentication settings. Include those checks in first-use acceptance with the selected Authentik version and client.

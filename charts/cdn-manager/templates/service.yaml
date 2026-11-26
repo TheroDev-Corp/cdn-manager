@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cdn-manager.fullname" . }}
+  labels:
+    {{- include "cdn-manager.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "cdn-manager.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: web
+      port: {{ .Values.service.port }}
+      targetPort: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cdn-manager.metricsName" . }}
+  labels:
+    {{- include "cdn-manager.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  selector:
+    {{- include "cdn-manager.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics

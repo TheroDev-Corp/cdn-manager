@@ -1,0 +1,135 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - name: Build and type-check the embedded web app
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Check Go, REST contract, and OAuth
+        run: |
+          go mod tidy -diff
+          go vet ./...
+          go test -race ./...
+      - name: Render the chart and validate dashboard JSON
+        run: |
+          helm lint charts/cdn-manager
+          helm template cdn-manager charts/cdn-manager --namespace fixture --set ingress.enabled=true --set ingress.tlsSecretName=fixture-tls --set serviceMonitor.enabled=true --set persistence.existingClaim=cdn-manager-state >/tmp/manifests.yaml
+          for dashboard in observability/grafana/*.json; do
+            jq -e '.uid and (.panels | length > 0)' "$dashboard"
+          done
+      - name: Install browser and media test dependencies
+        working-directory: web
+        run: |
+          bunx playwright install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Test the browser UI
+        working-directory: web
+        run: bun run test:browser tests/manager.spec.ts
+      - name: Start the disposable Compose fixture
+        run: docker compose up -d --build --wait --wait-timeout 180
+      - name: Verify S3 operations on Garage
+        env:
+          CDN_MANAGER_TEST_S3_REGION: example
+          CDN_MANAGER_TEST_S3_BUCKET: assets
+          CDN_MANAGER_TEST_S3_CONDITIONAL_WRITES: ignored
+        run: |
+          garage_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(docker compose ps -q garage)")
+          export CDN_MANAGER_TEST_S3_ENDPOINT="http://$garage_ip:3900"
+          CDN_MANAGER_TEST_S3_ACCESS_KEY=$(docker compose config --format json | jq -er '.services.manager.environment.DEMO_ACCESS_KEY')
+          CDN_MANAGER_TEST_S3_SECRET_KEY=$(docker compose config --format json | jq -er '.services.manager.environment.DEMO_SECRET_KEY')
+          export CDN_MANAGER_TEST_S3_ACCESS_KEY CDN_MANAGER_TEST_S3_SECRET_KEY
+          go test -count=1 -race -run TestS3Integration ./internal/storage
+      - name: Run end-to-end tests against Compose
+        working-directory: web
+        env:
+          CDN_TEST_BASE_URL: http://127.0.0.1:8080
+        run: bun run test:browser tests/compose.spec.ts --workers=1
+      - name: Print fixture logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Remove the disposable fixture
+        if: always()
+        run: docker compose down --volumes
+
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'TheroDev-Corp/cdn-manager'
+    needs: [checks, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - name: Validate the tag and package the chart
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          chart_version=$(helm show chart charts/cdn-manager | awk '$1 == "version:" {print $2}')
+          app_version=$(helm show chart charts/cdn-manager | awk '$1 == "appVersion:" {print $2}' | tr -d '"')
+          test "$version" = "$chart_version"
+          test "$version" = "$app_version"
+          helm package charts/cdn-manager --destination dist
+          printf 'tag=%s\n' "$version" >>"$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/therodev-corp/cdn-manager:${{ steps.version.outputs.tag }}
+      - name: Publish the chart and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          package="dist/cdn-manager-$RELEASE_VERSION.tgz"
+          helm push "$package" oci://ghcr.io/therodev-corp/charts
+          gh release create "$GITHUB_REF_NAME" "$package" --verify-tag --generate-notes
