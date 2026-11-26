@@ -56,8 +56,8 @@ jobs:
           curl --fail --silent --show-error --retry 15 --retry-connrefused --retry-delay 1 --output /dev/null http://127.0.0.1:8080/
           manager=$(docker compose ps -q manager)
           test "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$manager")" = true
-          docker top "$manager" -eo uid,gid,comm |
-            awk '$1 == 65534 && $2 == 65534 && $3 == "cdn-manager" { found = 1 } END { exit !found }'
+          docker top "$manager" -eo pid,uid,gid,comm |
+            awk '$2 == 65534 && $3 == 65534 && $4 == "cdn-manager" { found = 1 } END { exit !found }'
           docker compose exec -T issuer bun -e \
             'const response = await fetch("http://127.0.0.1:9090/readyz"); if (!response.ok) process.exit(1)'
       - name: Verify S3 operations on Garage
