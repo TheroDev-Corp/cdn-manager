@@ -42,6 +42,12 @@ persistence:
   accessMode: ReadWriteOnce
   keep: true
 
+podSecurityContext:
+  # Keep the previous UID and GIDs when reusing a claim with state owned by that user.
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+
 service:
   port: 8080
 

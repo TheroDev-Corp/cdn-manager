@@ -14,15 +14,19 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 COPY web/assets.go web/assets.go
 COPY --from=ui /app/web/dist/ web/dist/
+RUN mkdir -p /out/rootfs/etc/ssl/certs /out/rootfs/usr/local/bin /out/rootfs/var/lib/cdn-manager && \
+    cp /etc/ssl/certs/ca-certificates.crt /out/rootfs/etc/ssl/certs/ && \
+    printf 'nobody:x:65534:65534:nobody:/nonexistent:/sbin/nologin\n' > /out/rootfs/etc/passwd && \
+    printf 'nobody:x:65534:\n' > /out/rootfs/etc/group && \
+    chmod 0700 /out/rootfs/var/lib/cdn-manager && \
+    chown 65534:65534 /out/rootfs/var/lib/cdn-manager
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/cdn-manager ./cmd/cdn-manager
-RUN mkdir -p /out/state && chmod 0700 /out/state && chown 65532:65532 /out/state
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/rootfs/usr/local/bin/cdn-manager ./cmd/cdn-manager
 
-FROM gcr.io/distroless/static-debian13:nonroot
-COPY --from=build /out/cdn-manager /usr/local/bin/cdn-manager
-COPY --chown=65532:65532 --from=build /out/state /var/lib/cdn-manager
-USER 65532:65532
+FROM scratch
+COPY --from=build /out/rootfs/ /
+USER 65534:65534
 EXPOSE 8080 9090
 ENV CDN_MANAGER_STATE_DIR=/var/lib/cdn-manager
 ENTRYPOINT ["/usr/local/bin/cdn-manager"]
