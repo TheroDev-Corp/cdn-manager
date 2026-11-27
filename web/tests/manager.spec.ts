@@ -1,5 +1,31 @@
 import { expect, test } from '@playwright/test'
 
+test('follows the system theme and remembers a manual choice across reloads', async ({page}) => {
+  await page.route('**/api/v1/session', route => route.fulfill({status: 401}))
+  await page.emulateMedia({colorScheme: 'dark'})
+  await page.goto('/')
+
+  const card = page.locator('.entry-card')
+  const lighter = page.getByRole('button', {name: 'Switch to light theme'})
+  const darker = page.getByRole('button', {name: 'Switch to dark theme'})
+  await expect(lighter).toBeVisible()
+  await expect(card).toHaveCSS('background-color', 'rgb(22, 22, 22)')
+  await page.emulateMedia({colorScheme: 'light'})
+  await expect(darker).toBeVisible()
+  await expect(card).toHaveCSS('background-color', 'rgb(255, 255, 255)')
+  await page.emulateMedia({colorScheme: 'dark'})
+  await lighter.click()
+  await page.reload()
+  await expect(darker).toBeVisible()
+  await expect(card).toHaveCSS('background-color', 'rgb(255, 255, 255)')
+
+  await darker.click()
+  await page.emulateMedia({colorScheme: 'light'})
+  await page.reload()
+  await expect(lighter).toBeVisible()
+  await expect(card).toHaveCSS('background-color', 'rgb(22, 22, 22)')
+})
+
 test('copies an exact CDN link and preserves a conflicted text draft', async ({page, context}) => {
   const key = 'сообщение #50%.css'
   const url = 'https://cdn.example.test/' + encodeURIComponent(key)
