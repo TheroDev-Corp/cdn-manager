@@ -92,7 +92,7 @@ func addTool[Input, Output any](s *Server, server *sdk.Server, name, description
 
 func clientError(err error) error {
 	for _, known := range []error{service.ErrForbidden, storage.ErrInvalid, storage.ErrNotFound, storage.ErrConflict,
-		storage.ErrUnsupported, storage.ErrTooLarge, storage.ErrBusy} {
+		storage.ErrUnsupported, storage.ErrTooLarge, storage.ErrBusy, storage.ErrJournalUnavailable, auth.ErrStoreUnavailable} {
 		if errors.Is(err, known) {
 			return known
 		}

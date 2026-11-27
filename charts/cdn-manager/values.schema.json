@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["replicaCount", "state"],
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "state": {
+      "type": "object",
+      "required": ["mode", "redisSecretKey", "redisPrefix", "spoolSize"],
+      "properties": {
+        "mode": { "enum": ["redis", "file"] },
+        "redisSecretKey": { "type": "string", "minLength": 1 },
+        "redisPrefix": { "type": "string", "pattern": "^[a-z0-9._-]{0,64}$" },
+        "spoolSize": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "if": {
+    "properties": { "state": { "properties": { "mode": { "const": "redis" } } } }
+  },
+  "then": {
+    "properties": { "replicaCount": { "minimum": 2 } }
+  },
+  "else": {
+    "properties": { "replicaCount": { "const": 1 } }
+  }
+}

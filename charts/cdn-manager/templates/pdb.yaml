@@ -1,0 +1,13 @@
+{{- if eq .Values.state.mode "redis" }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cdn-manager.fullname" . }}
+  labels:
+    {{- include "cdn-manager.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "cdn-manager.selectorLabels" . | nindent 6 }}
+{{- end }}

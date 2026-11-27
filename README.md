@@ -70,11 +70,13 @@ helm upgrade --install cdn-manager ./charts/cdn-manager \
 
 To install a packaged release, use `oci://ghcr.io/therodev-corp/charts/cdn-manager` in place of the local chart path and add `--version` with the matching published chart version. A stable Git tag such as `v0.1.0` publishes `ghcr.io/therodev-corp/cdn-manager:v0.1.0` and the chart's matching numeric alias `0.1.0`, alongside the chart and GitHub release. Pushes to `main` and `dev` update the corresponding GHCR tag after CI passes. Each tag resolves to one OCI image index with Linux amd64 and arm64 images. [CI and release workflow](.github/workflows/ci-release.yaml).
 
-The runtime uses a scratch image with a CA certificate bundle and runs as UID/GID 65534. The chart uses a read-only root filesystem and a retained PVC for the multipart journal and part staging. Keep that volume writable and dedicate each state directory to one instance. For an existing claim owned by the previous UID/GID 65532, set all three `podSecurityContext` values (`runAsUser`, `runAsGroup`, and `fsGroup`) to 65532 until the volume is migrated.
+The chart defaults to two active manager replicas on different Kubernetes hosts. Both accept UI, REST, and MCP requests and share state through Redis or Valkey. Provide a persistent Redis-compatible endpoint in `CDN_MANAGER_REDIS_URL` in `existingSecret`. The chart also supports a single manager with a retained PVC for standalone installations. See [shared state, capacity, and upgrade from 0.1.0](docs/shared-state.md).
+
+The manager runs as UID/GID 65534 with a read-only root filesystem. Each Redis-mode replica stages uploads in its own disk-backed `emptyDir`; it can stage up to four parts or single PUTs concurrently, at up to 64 MiB each. S3 retains uploaded parts and the final objects.
 
 ### Health and metrics
 
-The web and MCP listener defaults to `:8080`. The internal listener defaults to `:9090` and serves `/livez`, `/readyz`, `/metrics`, and `/sources/health`. Keep the internal listener on your monitoring network. Source health is tracked separately from manager readiness so a failed source leaves healthy sources usable.
+The web and MCP listener defaults to `:8080`. The internal listener defaults to `:9090` and serves `/livez`, `/readyz`, `/metrics`, and `/sources/health`. Keep the internal listener on your monitoring network. In Redis mode, readiness checks the shared state service. A Redis outage removes manager replicas from service while liveness stays healthy. Source health is tracked separately so an S3 failure leaves healthy sources usable.
 
 Enable `serviceMonitor.enabled` if your monitoring stack supports the ServiceMonitor CRD. Import the [API, SSO and MCP dashboard](observability/grafana/api.json) and [source transfer dashboard](observability/grafana/transfers.json) with a Prometheus-compatible datasource. Public cache and playback metrics come from the CDN gateway.
 

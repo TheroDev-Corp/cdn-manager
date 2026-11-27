@@ -11,9 +11,10 @@ require (
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/prometheus/client_golang v1.23.2
+	github.com/redis/go-redis/v9 v9.24.0
 	go.yaml.in/yaml/v2 v2.4.2
 	golang.org/x/oauth2 v0.36.0
-	golang.org/x/sys v0.41.0
+	golang.org/x/sys v0.50.0
 )
 
 require (
@@ -37,6 +38,7 @@ require (
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect

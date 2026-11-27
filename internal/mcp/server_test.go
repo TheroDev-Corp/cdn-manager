@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 type issuer struct {
 	server *httptest.Server
 	key    ed25519.PrivateKey
+	mu     sync.RWMutex
 	nonce  string
 	pkce   string
 }
@@ -51,15 +53,18 @@ func newIssuer(t *testing.T) *issuer {
 	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
 		client, secret, _ := r.BasicAuth()
 		pkce := sha256.Sum256([]byte(r.FormValue("code_verifier")))
+		i.mu.RLock()
+		nonce, challenge := i.nonce, i.pkce
+		i.mu.RUnlock()
 		if client != "web" || secret != "fixture-secret" || r.FormValue("code") != "browser-code" ||
-			base64.RawURLEncoding.EncodeToString(pkce[:]) != i.pkce {
+			base64.RawURLEncoding.EncodeToString(pkce[:]) != challenge {
 			http.Error(w, "bad code exchange", http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "unused", "token_type": "Bearer",
-			"id_token": i.issue("JWT", map[string]any{"aud": "web", "nonce": i.nonce}),
+			"id_token": i.issue("JWT", map[string]any{"aud": "web", "nonce": nonce}),
 		})
 	})
 	i.server = httptest.NewServer(mux)
@@ -84,14 +89,25 @@ func (i *issuer) issue(kind string, custom map[string]any) string {
 
 func (i *issuer) provider(t *testing.T, publicURL string) *auth.Provider {
 	t.Helper()
-	provider, err := auth.New(t.Context(), auth.Config{
-		PublicURL: publicURL, OIDCIssuer: i.server.URL, OIDCClientID: "web", OIDCClientSecret: "fixture-secret",
-		MCPAudience: "cdn-mcp", AllowInsecureLocalhost: true,
-	})
+	provider, err := auth.New(t.Context(), i.providerConfig(publicURL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return provider
+}
+
+func (i *issuer) providerConfig(publicURL string) auth.Config {
+	return auth.Config{
+		PublicURL: publicURL, OIDCIssuer: i.server.URL, OIDCClientID: "web", OIDCClientSecret: "fixture-secret",
+		MCPAudience: "cdn-mcp", AllowInsecureLocalhost: true,
+	}
+}
+
+func (i *issuer) expectLogin(query url.Values) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.nonce = query.Get("nonce")
+	i.pkce = query.Get("code_challenge")
 }
 
 func TestBrowserLoginAndLogout(t *testing.T) {
@@ -107,8 +123,7 @@ func TestBrowserLoginAndLogout(t *testing.T) {
 	if login.Code != http.StatusSeeOther || query.Get("code_challenge_method") != "S256" || query.Get("state") == "" || query.Get("nonce") == "" {
 		t.Fatalf("missing PKCE or transaction parameters: %d %s", login.Code, location)
 	}
-	i.nonce = query.Get("nonce")
-	i.pkce = query.Get("code_challenge")
+	i.expectLogin(query)
 	callback := func(state string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodGet, "/auth/callback?code=browser-code&state="+url.QueryEscape(state), nil)
 		r.AddCookie(login.Result().Cookies()[0])
@@ -266,8 +281,8 @@ func TestMCPAuthorizationAndSDK(t *testing.T) {
 		t.Fatalf("Authentik-style access token: %v", err)
 	}
 	expiry := time.Now().Add(time.Minute)
-	grant, until, ok := p.IssueUploadGrant(token, "upload", 2, 123, expiry)
-	if !ok || !until.Equal(expiry) {
+	grant, until, err := p.IssueUploadGrant(t.Context(), token, "upload", 2, 123, expiry)
+	if err != nil || !until.Equal(expiry) {
 		t.Fatalf("grant expiration %v, expected %v", until, expiry)
 	}
 	request.Header.Set("Authorization", "Bearer "+grant)
@@ -291,7 +306,7 @@ func TestMCPAuthorizationAndSDK(t *testing.T) {
 	if transferResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("OAuth token accepted as transfer grant: %d", transferResponse.Code)
 	}
-	if _, _, ok := p.IssueUploadGrant(token, "upload", 2, 123, time.Now().Add(-time.Second)); ok {
+	if _, _, err := p.IssueUploadGrant(t.Context(), token, "upload", 2, 123, time.Now().Add(-time.Second)); err == nil {
 		t.Fatal("issued a grant for an expired upload session")
 	}
 }

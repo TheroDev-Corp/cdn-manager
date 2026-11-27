@@ -3,13 +3,12 @@ package storage
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"hash"
 	"io"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,12 +17,13 @@ import (
 )
 
 const (
-	MinPartSize        = int64(8 << 20)
-	MaxPartSize        = int64(64 << 20)
-	MaxPartCount       = int64(10000)
-	UploadLifetime     = 24 * time.Hour
-	completedRetention = 7 * 24 * time.Hour
-	uploadMarker       = "cdn-manager-upload-id"
+	MinPartSize            = int64(8 << 20)
+	MaxPartSize            = int64(64 << 20)
+	MaxPartCount           = int64(10000)
+	uploadOperationTimeout = 10 * time.Minute
+	UploadLifetime         = 24 * time.Hour
+	completedRetention     = 7 * 24 * time.Hour
+	uploadMarker           = "cdn-manager-upload-id"
 )
 
 type UploadPart struct {
@@ -53,12 +53,6 @@ type uploadRecord struct {
 	CompletedAt time.Time
 }
 
-type uploadActivity struct {
-	exclusive bool
-	parts     map[int32]bool
-	readers   int
-}
-
 func (s *Store) StartUpload(ctx context.Context, subject, sourceID, bucket, key, contentType string, size int64) (Upload, error) {
 	source, err := s.Source(sourceID)
 	if err != nil {
@@ -84,6 +78,21 @@ func (s *Store) StartUpload(ctx context.Context, subject, sourceID, bucket, key,
 			PartSize: partSize, PartCount: int32((size + partSize - 1) / partSize), ExpiresAt: time.Now().UTC().Add(UploadLifetime), Parts: []UploadPart{}},
 		Subject: subject,
 	}
+	ctx, cancel := context.WithTimeout(ctx, uploadOperationTimeout)
+	defer cancel()
+	if err := s.uploads.reserve(ctx, record); err != nil {
+		return Upload{}, err
+	}
+	published := false
+	defer func() {
+		if published {
+			return
+		}
+		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer stop()
+		s.uploads.discardStart(cleanup, record.ID)
+	}()
+
 	out, err := source.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket: &bucket, Key: &key, ContentType: optional(contentType), Metadata: map[string]string{uploadMarker: id},
 	})
@@ -94,22 +103,30 @@ func (s *Store) StartUpload(ctx context.Context, subject, sourceID, bucket, key,
 	if record.ProviderID == "" {
 		return Upload{}, ErrConflict
 	}
-	if err := s.saveUpload(record); err != nil {
+	saveCtx, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelSave()
+	if err := s.uploads.publish(saveCtx, record); err != nil {
+		// The caller has never received the session ID, so it is safe
+		// to clean up this new provider upload even if publication won.
 		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		_, abortErr := source.client.AbortMultipartUpload(abortCtx, record.abortRequest())
 		return Upload{}, errors.Join(err, abortErr)
 	}
+	published = true
 	return record.Upload, nil
 }
 
 func (s *Store) UploadStatus(ctx context.Context, subject, sourceID, id string) (Upload, error) {
-	release, err := s.acquireUpload(id, 0, false)
+	ctx, cancel := context.WithTimeout(ctx, uploadOperationTimeout)
+	defer cancel()
+	lock, err := s.uploads.lock(ctx, id, 0, false, nil)
 	if err != nil {
 		return Upload{}, err
 	}
-	defer release()
-	record, source, err := s.openUpload(subject, sourceID, id)
+	defer lock.release()
+	ctx = lock.requestContext()
+	record, source, err := s.openUpload(ctx, lock, subject, sourceID, id)
 	if err != nil {
 		return Upload{}, err
 	}
@@ -132,8 +149,8 @@ func (s *Store) UploadStatus(ctx context.Context, subject, sourceID, id string) 
 
 // UploadRef identifies a subject's session before consulting S3. Callers can
 // recheck its current source permissions before invoking any upload operation.
-func (s *Store) UploadRef(subject, id string) (Upload, error) {
-	record, err := s.readUpload(id)
+func (s *Store) UploadRef(ctx context.Context, subject, id string) (Upload, error) {
+	record, err := s.uploads.read(ctx, id)
 	if err != nil {
 		return Upload{}, err
 	}
@@ -148,12 +165,7 @@ func (s *Store) UploadPart(ctx context.Context, subject, sourceID, id string, nu
 	if number < 1 {
 		return UploadPart{}, ErrInvalid
 	}
-	releaseSession, err := s.acquireUpload(id, number, false)
-	if err != nil {
-		return UploadPart{}, err
-	}
-	defer releaseSession()
-	record, source, err := s.openUpload(subject, sourceID, id)
+	record, source, err := s.openUpload(ctx, s.uploads, subject, sourceID, id)
 	if err != nil {
 		return UploadPart{}, err
 	}
@@ -168,11 +180,33 @@ func (s *Store) UploadPart(ctx context.Context, subject, sourceID, id string, nu
 		return UploadPart{}, err
 	}
 	defer releaseTransfer()
-	file, err := spool(s.stateDir, body, size)
+	var checksum hash.Hash
+	if s.sharedUploads && body != nil {
+		checksum = sha256.New()
+		body = io.TeeReader(body, checksum)
+	}
+	file, err := spool(s.spoolDir, body, size)
 	if err != nil {
 		return UploadPart{}, err
 	}
 	defer removeSpool(file)
+
+	// Slow client bodies should not hold a database connection or a lock.
+	ctx, cancel := context.WithTimeout(ctx, uploadOperationTimeout)
+	defer cancel()
+	lock, err := s.uploads.lock(ctx, id, number, false, partDigest(checksum))
+	if err != nil {
+		return UploadPart{}, err
+	}
+	defer lock.release()
+	ctx = lock.requestContext()
+	record, source, err = s.openUpload(ctx, lock, subject, sourceID, id)
+	if err != nil {
+		return UploadPart{}, err
+	}
+	if record.Result != nil {
+		return UploadPart{}, ErrConflict
+	}
 	out, err := source.client.UploadPart(ctx, &s3.UploadPartInput{
 		Bucket: &record.Bucket, Key: &record.Key, UploadId: &record.ProviderID, PartNumber: &number, ContentLength: &size, Body: file,
 	})
@@ -182,18 +216,36 @@ func (s *Store) UploadPart(ctx context.Context, subject, sourceID, id string, nu
 	return UploadPart{Number: number, ETag: aws.ToString(out.ETag), Size: size}, nil
 }
 
+func partDigest(checksum hash.Hash) []byte {
+	if checksum == nil {
+		return nil
+	}
+	return checksum.Sum(nil)
+}
+
 func (s *Store) CompleteUpload(ctx context.Context, subject, sourceID, id string) (Object, error) {
-	release, err := s.acquireUpload(id, 0, true)
+	ctx, cancel := context.WithTimeout(ctx, uploadOperationTimeout)
+	defer cancel()
+	lock, err := s.uploads.lock(ctx, id, 0, true, nil)
 	if err != nil {
 		return Object{}, err
 	}
-	defer release()
-	record, source, err := s.openUpload(subject, sourceID, id)
+	defer lock.release()
+	ctx = lock.requestContext()
+	record, source, err := s.openUpload(ctx, lock, subject, sourceID, id)
 	if err != nil {
 		return Object{}, err
 	}
+	return s.completeUpload(ctx, lock, record, source)
+}
+
+func (s *Store) completeUpload(ctx context.Context, lock uploadLock, record uploadRecord, source *Source) (Object, error) {
 	if record.Result != nil {
 		return *record.Result, nil
+	}
+
+	if lock.phase() == "aborting" {
+		return Object{}, ErrConflict
 	}
 
 	parts, err := source.listUploadParts(ctx, record)
@@ -201,7 +253,7 @@ func (s *Store) CompleteUpload(ctx context.Context, subject, sourceID, id string
 		if !errorCode(err, "NoSuchUpload") {
 			return Object{}, err
 		}
-		return s.recoverCompletion(ctx, source, record, err)
+		return s.recoverCompletion(ctx, lock, source, record, err)
 	}
 	if len(parts) != int(record.PartCount) {
 		return Object{}, ErrConflict
@@ -213,30 +265,40 @@ func (s *Store) CompleteUpload(ctx context.Context, subject, sourceID, id string
 		}
 		completed = append(completed, types.CompletedPart{ETag: aws.String(part.ETag), PartNumber: aws.Int32(part.Number)})
 	}
+	manifest, err := json.Marshal(parts)
+	if err != nil {
+		return Object{}, err
+	}
+	digest := sha256.Sum256(manifest)
+	if err := lock.prepare(ctx, "completing", digest[:]); err != nil {
+		return Object{}, err
+	}
 	out, err := source.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket: &record.Bucket, Key: &record.Key, UploadId: &record.ProviderID,
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
 	})
 	if err != nil {
-		return s.recoverCompletion(ctx, source, record, s3Error(err))
+		return s.recoverCompletion(ctx, lock, source, record, s3Error(err))
 	}
-	return s.storeCompletion(record, Object{
+	return s.storeCompletion(ctx, lock, record, Object{
 		Key: record.Key, ETag: aws.ToString(out.ETag), VersionID: aws.ToString(out.VersionId), Size: record.Size, ContentType: record.ContentType,
 	})
 }
 
-func (s *Store) recoverCompletion(ctx context.Context, source *Source, record uploadRecord, requestErr error) (Object, error) {
+func (s *Store) recoverCompletion(ctx context.Context, lock uploadLock, source *Source, record uploadRecord, requestErr error) (Object, error) {
 	object, ok, err := source.completedObject(ctx, record)
 	if err != nil || !ok {
 		return Object{}, errors.Join(requestErr, err)
 	}
-	return s.storeCompletion(record, object)
+	return s.storeCompletion(ctx, lock, record, object)
 }
 
-func (s *Store) storeCompletion(record uploadRecord, result Object) (Object, error) {
+func (s *Store) storeCompletion(ctx context.Context, lock uploadLock, record uploadRecord, result Object) (Object, error) {
 	record.Result = &result
 	record.CompletedAt = time.Now().UTC()
-	if err := s.saveUpload(record); err != nil {
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := lock.save(saveCtx, record); err != nil {
 		return Object{}, err
 	}
 	return result, nil
@@ -258,12 +320,15 @@ func (s *Source) completedObject(ctx context.Context, record uploadRecord) (Obje
 }
 
 func (s *Store) AbortUpload(ctx context.Context, subject, sourceID, id string) error {
-	release, err := s.acquireUpload(id, 0, true)
+	ctx, cancel := context.WithTimeout(ctx, uploadOperationTimeout)
+	defer cancel()
+	lock, err := s.uploads.lock(ctx, id, 0, true, nil)
 	if err != nil {
 		return err
 	}
-	defer release()
-	record, source, err := s.openUpload(subject, sourceID, id)
+	defer lock.release()
+	ctx = lock.requestContext()
+	record, source, err := s.openUpload(ctx, lock, subject, sourceID, id)
 	if err != nil {
 		return err
 	}
@@ -273,15 +338,18 @@ func (s *Store) AbortUpload(ctx context.Context, subject, sourceID, id string) e
 	if _, ok, err := source.completedObject(ctx, record); err != nil || ok {
 		return errors.Join(ErrConflict, err)
 	}
-	return s.abortUpload(ctx, source, record)
+	return s.abortUpload(ctx, lock, source, record)
 }
 
-func (s *Store) abortUpload(ctx context.Context, source *Source, record uploadRecord) error {
+func (s *Store) abortUpload(ctx context.Context, lock uploadLock, source *Source, record uploadRecord) error {
+	if err := lock.prepare(ctx, "aborting", nil); err != nil {
+		return err
+	}
 	_, err := source.client.AbortMultipartUpload(ctx, record.abortRequest())
 	if err != nil && !errorCode(err, "NoSuchUpload") {
 		return s3Error(err)
 	}
-	return os.Remove(s.uploadPath(record.ID))
+	return lock.remove(ctx, record.ID)
 }
 
 func (r uploadRecord) abortRequest() *s3.AbortMultipartUploadInput {
@@ -313,47 +381,8 @@ func (s *Source) listUploadParts(ctx context.Context, record uploadRecord) ([]Up
 	return parts, nil
 }
 
-func (s *Store) acquireUpload(id string, part int32, exclusive bool) (func(), error) {
-	if !isUploadID(id) {
-		return nil, ErrNotFound
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	activity := s.active[id]
-	if activity == nil {
-		activity = &uploadActivity{parts: make(map[int32]bool)}
-		s.active[id] = activity
-	}
-	if activity.exclusive || (exclusive && (activity.readers > 0 || len(activity.parts) > 0)) || activity.parts[part] {
-		return nil, ErrBusy
-	}
-	switch {
-	case exclusive:
-		activity.exclusive = true
-	case part > 0:
-		activity.parts[part] = true
-	default:
-		activity.readers++
-	}
-	return func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		switch {
-		case exclusive:
-			activity.exclusive = false
-		case part > 0:
-			delete(activity.parts, part)
-		default:
-			activity.readers--
-		}
-		if !activity.exclusive && activity.readers == 0 && len(activity.parts) == 0 {
-			delete(s.active, id)
-		}
-	}, nil
-}
-
-func (s *Store) openUpload(subject, sourceID, id string) (uploadRecord, *Source, error) {
-	record, err := s.readUpload(id)
+func (s *Store) openUpload(ctx context.Context, reader uploadReader, subject, sourceID, id string) (uploadRecord, *Source, error) {
+	record, err := reader.read(ctx, id)
 	if err != nil {
 		return uploadRecord{}, nil, err
 	}
@@ -390,61 +419,16 @@ func isUploadID(id string) bool {
 	return true
 }
 
-func (s *Store) uploadPath(id string) string { return filepath.Join(s.stateDir, id+".json") }
-
-func (s *Store) readUpload(id string) (uploadRecord, error) {
-	if !isUploadID(id) {
-		return uploadRecord{}, ErrNotFound
-	}
-	var record uploadRecord
-	body, err := os.ReadFile(s.uploadPath(id))
-	if errors.Is(err, os.ErrNotExist) {
-		return record, ErrNotFound
-	}
-	if err != nil {
-		return record, err
-	}
-	if err := json.Unmarshal(body, &record); err != nil {
-		return record, err
-	}
-	if record.ID != id || record.ProviderID == "" {
-		return record, ErrConflict
-	}
-	return record, nil
-}
-
-func (s *Store) saveUpload(record uploadRecord) error {
-	file, err := os.CreateTemp(s.stateDir, ".record-*.tmp")
-	if err != nil {
-		return err
-	}
-	defer removeSpool(file)
-	if err := json.NewEncoder(file).Encode(record); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return os.Rename(file.Name(), s.uploadPath(record.ID))
-}
-
 // Sweep removes expired records and aborts their S3 uploads. Call periodically.
 func (s *Store) Sweep(ctx context.Context) error {
-	entries, err := os.ReadDir(s.stateDir)
+	ids, err := s.uploads.expired(ctx, time.Now().UTC())
 	if err != nil {
 		return err
 	}
 	var failures []error
-	for _, entry := range entries {
+	for _, id := range ids {
 		if ctx.Err() != nil {
 			return errors.Join(append(failures, ctx.Err())...)
-		}
-		id, ok := strings.CutSuffix(entry.Name(), ".json")
-		if !ok || !isUploadID(id) {
-			continue
 		}
 		err := s.sweepUpload(ctx, id)
 		if err != nil && !errors.Is(err, ErrBusy) && !errors.Is(err, ErrNotFound) {
@@ -455,19 +439,23 @@ func (s *Store) Sweep(ctx context.Context) error {
 }
 
 func (s *Store) sweepUpload(ctx context.Context, id string) error {
-	release, err := s.acquireUpload(id, 0, true)
+	lock, err := s.uploads.lock(ctx, id, 0, true, nil)
 	if err != nil {
 		return err
 	}
-	defer release()
-	record, err := s.readUpload(id)
+	defer lock.release()
+	ctx = lock.requestContext()
+	if lock.phase() == "starting" {
+		return lock.remove(ctx, id)
+	}
+	record, err := lock.read(ctx, id)
 	if err != nil {
 		return err
 	}
 	now := time.Now()
 	if record.Result != nil {
 		if now.Sub(record.CompletedAt) > completedRetention {
-			return os.Remove(s.uploadPath(id))
+			return lock.remove(ctx, id)
 		}
 		return nil
 	}
@@ -483,8 +471,20 @@ func (s *Store) sweepUpload(ctx context.Context, id string) error {
 		return err
 	}
 	if ok {
-		_, err := s.storeCompletion(record, object)
+		_, err := s.storeCompletion(ctx, lock, record, object)
 		return err
 	}
-	return s.abortUpload(ctx, source, record)
+	if lock.phase() == "completing" {
+		// Once a complete was dispatched, retry the same manifest rather
+		// than racing the provider with a conflicting abort request.
+		_, err := s.completeUpload(ctx, lock, record, source)
+		if err != nil && now.After(record.ExpiresAt.Add(completedRetention)) &&
+			(errors.Is(err, ErrConflict) || errorCode(err, "NoSuchUpload")) {
+			// Provider lifecycle cleanup also removes an orphan left by
+			// a process that died during creation or a missing manifest.
+			return lock.remove(ctx, id)
+		}
+		return err
+	}
+	return s.abortUpload(ctx, lock, source, record)
 }

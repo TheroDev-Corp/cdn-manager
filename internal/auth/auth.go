@@ -16,6 +16,7 @@ import (
 
 	"github.com/TheroDev-Corp/cdn-manager/internal/service"
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/oauth2"
 )
 
@@ -26,7 +27,10 @@ const (
 	defaultTTL   = 8 * time.Hour
 )
 
-var ErrUnauthorized = errors.New("authentication required")
+var (
+	ErrUnauthorized     = errors.New("authentication required")
+	ErrStoreUnavailable = errors.New("authentication storage unavailable")
+)
 
 type Config struct {
 	PublicURL              string
@@ -38,6 +42,8 @@ type Config struct {
 	MCPScopes              []string
 	SessionTTL             time.Duration
 	AllowInsecureLocalhost bool
+	Redis                  redis.UniversalClient
+	RedisPrefix            string
 }
 
 type Provider struct {
@@ -120,9 +126,9 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		},
 		webVerifier:  webProvider.VerifierContext(ctx, &oidc.Config{ClientID: cfg.OIDCClientID}),
 		mcpVerifier:  mcpProvider.VerifierContext(ctx, &oidc.Config{ClientID: cfg.MCPAudience}),
-		logins:       newExpiringStore[login](4096),
-		sessions:     newExpiringStore[session](8192),
-		uploadGrants: newExpiringStore[UploadGrant](8192),
+		logins:       newExpiringStore[login](cfg.Redis, cfg.RedisPrefix, "login", 4096),
+		sessions:     newExpiringStore[session](cfg.Redis, cfg.RedisPrefix, "session", 8192),
+		uploadGrants: newExpiringStore[UploadGrant](cfg.Redis, cfg.RedisPrefix, "grant", 8192),
 	}, nil
 }
 

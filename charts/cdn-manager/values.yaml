@@ -1,10 +1,20 @@
+replicaCount: 2
+state:
+  mode: redis
+  # The Secret key in existingSecret that contains the Redis connection URL.
+  redisSecretKey: CDN_MANAGER_REDIS_URL
+  # Empty derives the namespace from the Helm release name and namespace.
+  redisPrefix: ""
+  # Maximum temporary disk use for spooled transfers in each Redis-mode pod.
+  spoolSize: 320Mi
+
 image:
   repository: ghcr.io/therodev-corp/cdn-manager
   tag: ""
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-# This Secret contains the environment variable names referenced under config.
+# This Secret supplies OIDC, S3 credentials, and the Redis connection URL.
 existingSecret: cdn-manager-credentials
 config:
   auth:
@@ -34,7 +44,7 @@ config:
         multipart: true
 
 persistence:
-  # One manager process needs exclusive access to the upload state directory.
+  # Only used with state.mode=file and replicaCount=1.
   existingClaim: ""
   size: 2Gi
   # Null uses the cluster default. An empty string disables dynamic provisioning.
@@ -68,7 +78,26 @@ resources:
   requests:
     cpu: 100m
     memory: 96Mi
+    ephemeral-storage: 320Mi
   limits:
     cpu: "1"
     memory: 256Mi
+    ephemeral-storage: 512Mi
 goMemLimit: 160MiB
+
+# Optional single persistent Valkey instance. It does not provide datastore HA.
+valkey:
+  enabled: false
+  image: valkey/valkey:9-alpine@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882
+  # Secret with one users.acl file. The manager still needs its Redis connection URL.
+  existingSecret: ""
+  storageClassName: null
+  storageSize: 1Gi
+  maxmemory: 32mb
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
