@@ -32,7 +32,7 @@ The settings panel also shows the endpoint, Streamable HTTP transport, and regis
 ## Storage and sharing
 
 - **Browse files.** Navigate prefixes, load additional pages, filter loaded keys, and sort the loaded results. Inspect object metadata, download individual files, or stream selected files as a ZIP. Bulk deletion reports failures per object.
-- **Upload files and folders.** Sources with multipart enabled support progress, part retries, and recovery across manager restarts with a persistent state volume. The manager keeps the upload session in its journal and checks S3 for completed parts before resuming.
+- **Upload files and folders.** Sources with multipart enabled support progress, part retries, and recovery across manager restarts. The manager keeps the session in Redis or in the standalone file journal and checks S3 for completed parts before resuming.
 - **Edit text.** Edit supported text formats such as JSON and CSS up to 1 MiB on sources that support atomic conditional writes. A conflicting save preserves the user's draft. Conditional writes are disabled in the Garage demo.
 - **Share a permanent link.** The configured CDN route maps a key to its origin. Test its availability from the manager in the object's details. A separate, expiring S3 link requires presign permission and an S3 endpoint the recipient can reach.
 - **Respect provider capabilities.** Object versions, bucket creation and deletion, and bucket policy editing depend on both the provider and the source configuration. [Provider compatibility matrix and parity gaps](docs/compatibility.md).
