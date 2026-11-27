@@ -1,11 +1,10 @@
 package auth
 
 import (
+	"crypto/sha256"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -98,7 +97,7 @@ func testMCPBrokerFlow(t *testing.T, first, second redis.UniversalClient) {
 	p.MountMCPBroker(front)
 	observer.MountMCPBroker(back)
 	metadata := brokerJSONForTest[map[string]any](t, brokerRequestForTest(front, http.MethodGet, "/.well-known/oauth-authorization-server"+MCPBrokerPath, nil, nil), 200)
-	if metadata["registration_endpoint"] != p.mcpIssuer+"/register" || metadata["client_id_metadata_document_supported"] != true {
+	if _, advertisesCIMD := metadata["client_id_metadata_document_supported"]; metadata["registration_endpoint"] != p.mcpIssuer+"/register" || advertisesCIMD {
 		t.Fatalf("incorrect broker metadata: %+v", metadata)
 	}
 	if settings := p.MCPConnection(); settings.ClientID != "" || settings.Issuer != p.mcpIssuer {
@@ -116,7 +115,7 @@ func testMCPBrokerFlow(t *testing.T, first, second redis.UniversalClient) {
 	if client.ID == "" {
 		t.Fatal("registration omitted the client ID")
 	}
-	if _, err := observer.broker.client(t.Context(), client.ID+"A"); err == nil {
+	if _, err := observer.broker.client(client.ID + "A"); err == nil {
 		t.Fatal("accepted modified registration")
 	}
 	verifier := newToken()
@@ -192,26 +191,29 @@ func testMCPBrokerFlow(t *testing.T, first, second redis.UniversalClient) {
 	}
 }
 
-func TestMCPBrokerClientMetadata(t *testing.T) {
+func TestMCPBrokerRejectsClientMetadataURLs(t *testing.T) {
 	p := testBrokerProvider(Config{})
 	const id = "https://client.example/oauth/mcp.json"
-	p.broker.metadataClient = &http.Client{Transport: tokenTransport(func(r *http.Request) (*http.Response, error) {
-		if r.Method != http.MethodGet || r.URL.String() != id || r.Header.Get("Accept") != "application/json" {
-			t.Fatalf("unexpected metadata request: %v", r.URL)
-		}
-		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{
-			"client_id":"https://client.example/oauth/mcp.json","client_name":"MCP fixture",
-			"token_endpoint_auth_method":"none","redirect_uris":["https://client.example/callback"],
-			"grant_types":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:device_code"]
-		}`))}, nil
-	})}
-	client, err := p.broker.client(t.Context(), id)
-	if err != nil || !client.acceptsRedirect("https://client.example/callback") || client.acceptsRedirect("https://client.example/callback?next=other") {
-		t.Fatalf("metadata callback validation failed: %v", err)
+	if _, err := p.broker.client(id); err == nil {
+		t.Fatal("broker accepted a client without dynamic registration")
 	}
-	for _, address := range []string{"127.0.0.1", "169.254.169.254", "100.64.20.1", "10.0.0.1", "192.168.1.1", "::1", "::ffff:127.0.0.1", "fe80::aa", "fd15::1", "ff00::1"} {
-		if publicMetadataAddress(netip.MustParseAddr(address)) {
-			t.Errorf("accepted non-public metadata address %s", address)
-		}
+	sessionID, err := p.sessions.issue(t.Context(), session{Actor: service.Actor{Subject: "legacy"}}, time.Now().Add(time.Hour), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := brokerGrant{ClientID: id, Session: sha256.Sum256([]byte(sessionID)), Resource: p.mcpAudience, Expires: time.Now().Add(time.Hour)}
+	grantID, err := p.broker.grants.issue(t.Context(), grant, grant.Expires, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := p.broker.issueTokens(t.Context(), grantID, grant, []string{"read"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.broker.accessToken(t.Context(), tokens.AccessToken); err == nil {
+		t.Fatal("broker accepted a previously issued CIMD access token")
+	}
+	if _, err := p.broker.rotate(t.Context(), tokens.RefreshToken, id, ""); err == nil {
+		t.Fatal("broker refreshed a previously issued CIMD token")
 	}
 }

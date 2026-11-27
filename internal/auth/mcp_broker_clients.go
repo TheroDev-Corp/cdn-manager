@@ -1,21 +1,17 @@
 package auth
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"io"
 	"mime"
 	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
-	"time"
 	"unicode"
 )
 
@@ -42,7 +38,7 @@ func (b *mcpBroker) register(w http.ResponseWriter, r *http.Request) {
 		brokerError(w, http.StatusBadRequest, "invalid_client_metadata")
 		return
 	}
-	if code := client.validate(false); code != "" {
+	if code := client.validate(); code != "" {
 		brokerError(w, http.StatusBadRequest, code)
 		return
 	}
@@ -50,17 +46,17 @@ func (b *mcpBroker) register(w http.ResponseWriter, r *http.Request) {
 	brokerJSON(w, http.StatusCreated, client)
 }
 
-func (c *brokerClient) validate(metadataDocument bool) string {
-	if !metadataDocument && c.ID != "" {
+func (c *brokerClient) validate() string {
+	if c.ID != "" {
 		return "invalid_client_metadata"
 	}
-	if c.Name == "" && !metadataDocument {
+	if c.Name == "" {
 		c.Name = "MCP client"
 	}
 	if c.AuthMethod == "" {
 		c.AuthMethod = "none"
 	}
-	if len(c.AuthMethods) != 0 && (!metadataDocument || !slices.Contains(c.AuthMethods, "none")) {
+	if len(c.AuthMethods) != 0 {
 		return "invalid_client_metadata"
 	}
 	if strings.TrimSpace(c.Name) == "" || len(c.Name) > 120 || strings.ContainsFunc(c.Name, unicode.IsControl) ||
@@ -80,14 +76,6 @@ func (c *brokerClient) validate(metadataDocument bool) string {
 	}
 	if len(c.Responses) == 0 {
 		c.Responses = []string{"code"}
-	}
-	if metadataDocument {
-		// The document describes a client across authorization servers. For
-		// example, VS Code also advertises the device grant for other issuers.
-		if !slices.Contains(c.Grants, "authorization_code") || !slices.Contains(c.Responses, "code") {
-			return "invalid_client_metadata"
-		}
-		return ""
 	}
 	if len(c.Grants) > 2 || !slices.Contains(c.Grants, "authorization_code") {
 		return "invalid_client_metadata"
@@ -115,51 +103,25 @@ func (b *mcpBroker) clientSignature(encoded string) []byte {
 	return mac.Sum(nil)
 }
 
-func (b *mcpBroker) client(ctx context.Context, id string) (brokerClient, error) {
+func (b *mcpBroker) client(id string) (brokerClient, error) {
 	var client brokerClient
 	if len(id) > 8500 {
 		return client, ErrUnauthorized
 	}
-	registered, isRegistered := strings.CutPrefix(id, registeredClientPrefix)
-	if isRegistered {
-		encoded, signature, ok := strings.Cut(registered, ".")
-		if !ok || len(signature) != 43 {
-			return client, ErrUnauthorized
-		}
-		mac, err := base64.RawURLEncoding.DecodeString(signature)
-		if err != nil || !hmac.Equal(mac, b.clientSignature(encoded)) {
-			return client, ErrUnauthorized
-		}
-		payload, err := base64.RawURLEncoding.DecodeString(encoded)
-		if err != nil || json.Unmarshal(payload, &client) != nil || client.validate(false) != "" {
-			return client, ErrUnauthorized
-		}
-		return client, nil
-	}
-	parsed, err := url.Parse(id)
-	if err != nil || len(id) > 1024 || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" ||
-		!strings.Contains(parsed.Hostname(), ".") || net.ParseIP(parsed.Hostname()) != nil ||
-		(parsed.Port() != "" && parsed.Port() != "443") || parsed.Path == "" || parsed.Path == "/" ||
-		strings.Contains(id, "#") || parsed.RawQuery != "" || parsed.ForceQuery {
+	registered, ok := strings.CutPrefix(id, registeredClientPrefix)
+	if !ok {
 		return client, ErrUnauthorized
 	}
-	if slices.Contains(strings.Split(parsed.Path, "/"), "..") || slices.Contains(strings.Split(parsed.Path, "/"), ".") {
+	encoded, signature, ok := strings.Cut(registered, ".")
+	if !ok || len(signature) != 43 {
 		return client, ErrUnauthorized
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, id, nil)
-	if err != nil {
+	mac, err := base64.RawURLEncoding.DecodeString(signature)
+	if err != nil || !hmac.Equal(mac, b.clientSignature(encoded)) {
 		return client, ErrUnauthorized
 	}
-	req.Header.Set("Accept", "application/json")
-	response, err := b.metadataClient.Do(req)
-	if err != nil {
-		return client, ErrUnauthorized
-	}
-	defer response.Body.Close()
-	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	payload, err := io.ReadAll(io.LimitReader(response.Body, brokerBodyLimit+1))
-	if err != nil || response.StatusCode != http.StatusOK || mediaType != "application/json" || len(payload) > brokerBodyLimit ||
-		json.Unmarshal(payload, &client) != nil || client.ID != id || client.validate(true) != "" {
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || json.Unmarshal(payload, &client) != nil || client.validate() != "" {
 		return client, ErrUnauthorized
 	}
 	return client, nil
@@ -210,46 +172,4 @@ func (c brokerClient) acceptsRedirect(raw string) bool {
 		}
 	}
 	return false
-}
-
-var nonPublicMetadataRanges = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("192.0.0.0/24"),
-	netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("198.51.100.0/24"),
-	netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("240.0.0.0/4"), netip.MustParsePrefix("2001::/23"),
-	netip.MustParsePrefix("2001:db8::/32"), netip.MustParsePrefix("2002::/16"), netip.MustParsePrefix("3fff::/20"),
-}
-
-var globalMetadataIPv6 = netip.MustParsePrefix("2000::/3")
-
-func publicMetadataAddress(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	return ip.IsGlobalUnicast() && !ip.IsPrivate() && (!ip.Is6() || globalMetadataIPv6.Contains(ip)) &&
-		!slices.ContainsFunc(nonPublicMetadataRanges, func(prefix netip.Prefix) bool { return prefix.Contains(ip) })
-}
-
-func publicMetadataClient() *http.Client {
-	transport := &http.Transport{DisableKeepAlives: true, TLSHandshakeTimeout: 4 * time.Second, MaxResponseHeaderBytes: 16 << 10,
-		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(address)
-			if err != nil || port != "443" || net.ParseIP(host) != nil {
-				return nil, errors.New("invalid metadata host")
-			}
-			ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-			if err != nil || len(ips) == 0 || slices.ContainsFunc(ips, func(ip netip.Addr) bool { return !publicMetadataAddress(ip) }) {
-				return nil, errors.New("metadata needs a public address")
-			}
-			// TLS still validates the original hostname. Dial the checked addresses
-			// directly so a second DNS lookup cannot change the destination.
-			dialer := &net.Dialer{Timeout: 2 * time.Second}
-			for _, ip := range ips {
-				conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
-				if err == nil {
-					return conn, nil
-				}
-			}
-			return nil, errors.New("metadata host unavailable")
-		},
-	}
-	return &http.Client{Transport: transport, Timeout: 6 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
