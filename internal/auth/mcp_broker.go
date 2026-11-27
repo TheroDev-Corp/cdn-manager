@@ -27,6 +27,7 @@ type mcpBroker struct {
 	provider       *Provider
 	key            []byte
 	metadataClient *http.Client
+	metadataRelay  *cimdRelayClient
 	requests       expiringStore[brokerRequest]
 	codes          expiringStore[brokerCode]
 	grants         expiringStore[brokerGrant]
@@ -60,9 +61,10 @@ type brokerToken struct {
 	Scopes  []string
 }
 
-func newMCPBroker(p *Provider, cfg Config) *mcpBroker {
+func newMCPBroker(p *Provider, cfg Config, metadataRelay *cimdRelayClient) *mcpBroker {
 	return &mcpBroker{
 		provider: p, key: slices.Clone(cfg.MCPBrokerKey), metadataClient: publicMetadataClient(),
+		metadataRelay:  metadataRelay,
 		requests:       newExpiringStore[brokerRequest](cfg.Redis, cfg.RedisPrefix, "mcp-request", 4096),
 		codes:          newExpiringStore[brokerCode](cfg.Redis, cfg.RedisPrefix, "mcp-code", 4096),
 		grants:         newExpiringStore[brokerGrant](cfg.Redis, cfg.RedisPrefix, "mcp-grant", 8192),

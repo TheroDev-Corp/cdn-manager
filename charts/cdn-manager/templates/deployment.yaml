@@ -92,6 +92,13 @@ spec:
                   name: {{ $.Values.existingSecret | quote }}
                   key: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.auth.mcpMetadataRelayTokenEnv }}
+            - name: {{ . | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ . | quote }}
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ required "existingSecret names the Secret that supplies OIDC and S3 credentials" .Values.existingSecret }}

@@ -16,16 +16,18 @@ import (
 )
 
 type authConfig struct {
-	PublicURL              string
-	OIDCIssuer             string
-	OIDCClientID           string
-	OIDCClientSecretEnv    string
-	MCPIssuer              string
-	MCPAudience            string
-	MCPScopes              []string
-	MCPBrokerKeyEnv        string
-	SessionTTL             string
-	AllowInsecureLocalhost bool
+	PublicURL                string
+	OIDCIssuer               string
+	OIDCClientID             string
+	OIDCClientSecretEnv      string
+	MCPIssuer                string
+	MCPAudience              string
+	MCPScopes                []string
+	MCPBrokerKeyEnv          string
+	MCPMetadataRelayURL      string
+	MCPMetadataRelayTokenEnv string
+	SessionTTL               string
+	AllowInsecureLocalhost   bool
 }
 
 type config struct {
@@ -75,6 +77,7 @@ func (cfg authConfig) provider() (auth.Config, error) {
 		PublicURL: cfg.PublicURL, OIDCIssuer: cfg.OIDCIssuer, OIDCClientID: cfg.OIDCClientID,
 		OIDCClientSecret: os.Getenv(cfg.OIDCClientSecretEnv), MCPIssuer: cfg.MCPIssuer, MCPAudience: cfg.MCPAudience,
 		MCPScopes: cfg.MCPScopes, MCPBrokerKey: brokerKey, SessionTTL: ttl, AllowInsecureLocalhost: cfg.AllowInsecureLocalhost,
+		MCPMetadataRelayURL: cfg.MCPMetadataRelayURL, MCPMetadataRelayToken: os.Getenv(cfg.MCPMetadataRelayTokenEnv),
 	}, nil
 }
 

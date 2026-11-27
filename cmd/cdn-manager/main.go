@@ -43,8 +43,11 @@ func runCommand(ctx context.Context, logger *slog.Logger, args []string) error {
 	if len(args) == 0 {
 		return run(ctx, logger)
 	}
+	if len(args) == 1 && args[0] == "serve-mcp-metadata" {
+		return serveMCPMetadata(ctx, logger)
+	}
 	if len(args) != 2 || args[0] != "import-file-state" {
-		return errors.New("usage: cdn-manager [import-file-state LEGACY_STATE_DIRECTORY]")
+		return errors.New("usage: cdn-manager [import-file-state LEGACY_STATE_DIRECTORY | serve-mcp-metadata]")
 	}
 	dir := args[1]
 	info, err := os.Stat(dir)

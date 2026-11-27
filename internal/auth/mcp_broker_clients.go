@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net"
 	"net/http"
@@ -136,31 +138,80 @@ func (b *mcpBroker) client(ctx context.Context, id string) (brokerClient, error)
 		}
 		return client, nil
 	}
+	if !validMetadataURL(id) {
+		return client, ErrUnauthorized
+	}
+	payload, err := fetchClientMetadata(ctx, b.metadataClient, id)
+	if err != nil && b.metadataRelay != nil {
+		slog.DebugContext(ctx, "retrying MCP client metadata through relay", "reason", err.Error())
+		payload, err = b.metadataRelay.fetch(ctx, id)
+	}
+	if err == nil {
+		client, err = decodeClientMetadata(payload, id)
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "MCP client metadata unavailable", "reason", err.Error())
+		return brokerClient{}, ErrUnauthorized
+	}
+	return client, nil
+}
+
+func validMetadataURL(id string) bool {
 	parsed, err := url.Parse(id)
 	if err != nil || len(id) > 1024 || parsed.Scheme != "https" || parsed.User != nil || parsed.Hostname() == "" ||
 		!strings.Contains(parsed.Hostname(), ".") || net.ParseIP(parsed.Hostname()) != nil ||
 		(parsed.Port() != "" && parsed.Port() != "443") || parsed.Path == "" || parsed.Path == "/" ||
 		strings.Contains(id, "#") || parsed.RawQuery != "" || parsed.ForceQuery {
-		return client, ErrUnauthorized
+		return false
 	}
-	if slices.Contains(strings.Split(parsed.Path, "/"), "..") || slices.Contains(strings.Split(parsed.Path, "/"), ".") {
-		return client, ErrUnauthorized
-	}
+	path := strings.Split(parsed.Path, "/")
+	return !slices.Contains(path, "..") && !slices.Contains(path, ".")
+}
+
+func fetchClientMetadata(ctx context.Context, httpClient *http.Client, id string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, id, nil)
 	if err != nil {
-		return client, ErrUnauthorized
+		return nil, errors.New("invalid metadata request")
 	}
 	req.Header.Set("Accept", "application/json")
-	response, err := b.metadataClient.Do(req)
+	response, err := httpClient.Do(req)
 	if err != nil {
-		return client, ErrUnauthorized
+		return nil, metadataTransportError(err)
 	}
 	defer response.Body.Close()
+	return readClientMetadata(response)
+}
+
+func metadataTransportError(err error) error {
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+		return errors.New("metadata request timed out")
+	}
+	return errors.New("metadata connection failed")
+}
+
+func readClientMetadata(response *http.Response) ([]byte, error) {
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metadata HTTP status %d", response.StatusCode)
+	}
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if mediaType != "application/json" {
+		return nil, errors.New("metadata response is not JSON")
+	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, brokerBodyLimit+1))
-	if err != nil || response.StatusCode != http.StatusOK || mediaType != "application/json" || len(payload) > brokerBodyLimit ||
-		json.Unmarshal(payload, &client) != nil || client.ID != id || client.validate(true) != "" {
-		return client, ErrUnauthorized
+	if err != nil || len(payload) > brokerBodyLimit {
+		return nil, errors.New("metadata response could not be read within the size limit")
+	}
+	return payload, nil
+}
+
+func decodeClientMetadata(payload []byte, id string) (brokerClient, error) {
+	var client brokerClient
+	if err := json.Unmarshal(payload, &client); err != nil {
+		return brokerClient{}, errors.New("invalid metadata JSON")
+	}
+	if client.ID != id || client.validate(true) != "" {
+		return brokerClient{}, errors.New("metadata does not match the client ID or supported registration rules")
 	}
 	return client, nil
 }

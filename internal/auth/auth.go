@@ -41,6 +41,8 @@ type Config struct {
 	MCPAudience            string
 	MCPScopes              []string
 	MCPBrokerKey           []byte
+	MCPMetadataRelayURL    string
+	MCPMetadataRelayToken  string
 	SessionTTL             time.Duration
 	AllowInsecureLocalhost bool
 	Redis                  redis.UniversalClient
@@ -76,6 +78,13 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	}
 	if len(cfg.MCPBrokerKey) != 0 && len(cfg.MCPBrokerKey) != 32 {
 		return nil, errors.New("MCP OAuth broker key must contain 32 bytes")
+	}
+	metadataRelay, err := newCIMDRelayClient(cfg.MCPMetadataRelayURL, cfg.MCPMetadataRelayToken)
+	if err != nil {
+		return nil, err
+	}
+	if metadataRelay != nil && len(cfg.MCPBrokerKey) == 0 {
+		return nil, errors.New("the MCP metadata relay requires the OAuth broker")
 	}
 	if len(cfg.MCPBrokerKey) == 0 && (cfg.MCPAudience == "" || cfg.MCPAudience == cfg.OIDCClientID) {
 		return nil, errors.New("MCP OAuth requires a named audience distinct from the web OIDC client ID")
@@ -130,7 +139,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if len(cfg.MCPBrokerKey) != 0 {
 		p.mcpIssuer = p.publicURL + MCPBrokerPath
 		p.mcpAudience = p.publicURL + MCPPath
-		p.broker = newMCPBroker(p, cfg)
+		p.broker = newMCPBroker(p, cfg, metadataRelay)
 	} else {
 		mcpProvider := webProvider
 		if cfg.MCPIssuer != cfg.OIDCIssuer {

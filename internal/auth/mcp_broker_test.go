@@ -25,7 +25,7 @@ func testBrokerProvider(cfg Config) *Provider {
 		mcpScopes: []string{service.Read, service.Write}, sessionTTL: time.Hour, secureCookies: true,
 		sessions: newExpiringStore[session](cfg.Redis, cfg.RedisPrefix, "session", 25),
 	}
-	p.broker = newMCPBroker(p, cfg)
+	p.broker = newMCPBroker(p, cfg, nil)
 	return p
 }
 

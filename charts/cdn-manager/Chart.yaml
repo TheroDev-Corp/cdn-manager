@@ -2,8 +2,8 @@ apiVersion: v2
 name: cdn-manager
 description: S3-backed CDN file manager with OIDC web sessions and MCP
 type: application
-version: 0.3.3
-appVersion: "0.3.3"
+version: 0.3.4
+appVersion: "0.3.4"
 home: https://github.com/TheroDev-Corp/cdn-manager
 sources:
   - https://github.com/TheroDev-Corp/cdn-manager
