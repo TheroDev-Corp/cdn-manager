@@ -51,9 +51,18 @@ type uploadRecord struct {
 	Subject     string
 	ProviderID  string
 	CompletedAt time.Time
+	CreateOnly  bool `json:",omitempty"`
 }
 
 func (s *Store) StartUpload(ctx context.Context, subject, sourceID, bucket, key, contentType string, size int64) (Upload, error) {
+	return s.startUpload(ctx, subject, sourceID, bucket, key, contentType, size, false)
+}
+
+func (s *Store) StartNewUpload(ctx context.Context, subject, sourceID, bucket, key, contentType string, size int64) (Upload, error) {
+	return s.startUpload(ctx, subject, sourceID, bucket, key, contentType, size, true)
+}
+
+func (s *Store) startUpload(ctx context.Context, subject, sourceID, bucket, key, contentType string, size int64, createOnly bool) (Upload, error) {
 	source, err := s.Source(sourceID)
 	if err != nil {
 		return Upload{}, err
@@ -70,13 +79,18 @@ func (s *Store) StartUpload(ctx context.Context, subject, sourceID, bucket, key,
 	if size > MaxPartSize*MaxPartCount {
 		return Upload{}, ErrTooLarge
 	}
+	if createOnly {
+		if err := source.requireMissing(ctx, bucket, key); err != nil {
+			return Upload{}, err
+		}
+	}
 
 	partSize := max(MinPartSize, (size+MaxPartCount-1)/MaxPartCount)
 	id := rand.Text()
 	record := uploadRecord{
 		Upload: Upload{ID: id, Source: sourceID, Bucket: bucket, Key: key, Size: size, ContentType: contentType,
 			PartSize: partSize, PartCount: int32((size + partSize - 1) / partSize), ExpiresAt: time.Now().UTC().Add(UploadLifetime), Parts: []UploadPart{}},
-		Subject: subject,
+		Subject: subject, CreateOnly: createOnly,
 	}
 	ctx, cancel := context.WithTimeout(ctx, uploadOperationTimeout)
 	defer cancel()
@@ -132,12 +146,14 @@ func (s *Store) UploadStatus(ctx context.Context, subject, sourceID, id string) 
 	}
 	if record.Result == nil {
 		record.Parts, err = source.listUploadParts(ctx, record)
-		if errorCode(err, "NoSuchUpload") {
+		if record.missingProviderUpload(err) {
 			if found, ok, lookupErr := source.completedObject(ctx, record); lookupErr != nil {
 				return Upload{}, lookupErr
 			} else if ok {
 				record.Result = &found
 				return record.Upload, nil
+			} else if record.CreateOnly && found.Key != "" {
+				return Upload{}, ErrObjectExists
 			}
 		}
 		if err != nil {
@@ -250,7 +266,7 @@ func (s *Store) completeUpload(ctx context.Context, lock uploadLock, record uplo
 
 	parts, err := source.listUploadParts(ctx, record)
 	if err != nil {
-		if !errorCode(err, "NoSuchUpload") {
+		if !record.missingProviderUpload(err) {
 			return Object{}, err
 		}
 		return s.recoverCompletion(ctx, lock, source, record, err)
@@ -270,15 +286,22 @@ func (s *Store) completeUpload(ctx context.Context, lock uploadLock, record uplo
 		return Object{}, err
 	}
 	digest := sha256.Sum256(manifest)
+	condition, err := source.createCondition(ctx, record.Bucket, record.Key, record.CreateOnly)
+	if err != nil {
+		if lock.phase() == "completing" && errors.Is(err, ErrObjectExists) {
+			return s.recoverCompletion(ctx, lock, source, record, err)
+		}
+		return Object{}, err
+	}
 	if err := lock.prepare(ctx, "completing", digest[:]); err != nil {
 		return Object{}, err
 	}
 	out, err := source.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket: &record.Bucket, Key: &record.Key, UploadId: &record.ProviderID,
-		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed}, IfNoneMatch: condition,
 	})
 	if err != nil {
-		return s.recoverCompletion(ctx, lock, source, record, s3Error(err))
+		return s.recoverCompletion(ctx, lock, source, record, createError(err, condition))
 	}
 	return s.storeCompletion(ctx, lock, record, Object{
 		Key: record.Key, ETag: aws.ToString(out.ETag), VersionID: aws.ToString(out.VersionId), Size: record.Size, ContentType: record.ContentType,
@@ -287,10 +310,28 @@ func (s *Store) completeUpload(ctx context.Context, lock uploadLock, record uplo
 
 func (s *Store) recoverCompletion(ctx context.Context, lock uploadLock, source *Source, record uploadRecord, requestErr error) (Object, error) {
 	object, ok, err := source.completedObject(ctx, record)
-	if err != nil || !ok {
+	if err != nil {
+		if errors.Is(requestErr, ErrObjectExists) {
+			return Object{}, err
+		}
 		return Object{}, errors.Join(requestErr, err)
 	}
-	return s.storeCompletion(ctx, lock, record, object)
+	if ok {
+		return s.storeCompletion(ctx, lock, record, object)
+	}
+	if record.CreateOnly && object.Key != "" && record.missingProviderUpload(requestErr) {
+		requestErr = ErrObjectExists
+	}
+	if errors.Is(requestErr, ErrObjectExists) {
+		// The provider rejected the write and the key belongs to another upload.
+		// Release the completion intent so the user can discard the old parts.
+		if lock.phase() == "completing" {
+			if err := lock.prepare(ctx, "active", nil); err != nil {
+				return Object{}, err
+			}
+		}
+	}
+	return Object{}, requestErr
 }
 
 func (s *Store) storeCompletion(ctx context.Context, lock uploadLock, record uploadRecord, result Object) (Object, error) {
@@ -313,7 +354,7 @@ func (s *Source) completedObject(ctx context.Context, record uploadRecord) (Obje
 		return Object{}, false, err
 	}
 	if object.Metadata[uploadMarker] != record.ID || object.Size != record.Size {
-		return Object{}, false, nil
+		return object, false, nil
 	}
 	// Keep the result stable across a successful completion and a recovered response.
 	return Object{Key: object.Key, Size: object.Size, ETag: object.ETag, VersionID: object.VersionID, ContentType: record.ContentType}, true, nil
@@ -346,10 +387,14 @@ func (s *Store) abortUpload(ctx context.Context, lock uploadLock, source *Source
 		return err
 	}
 	_, err := source.client.AbortMultipartUpload(ctx, record.abortRequest())
-	if err != nil && !errorCode(err, "NoSuchUpload") {
-		return s3Error(err)
+	if err = s3Error(err); err != nil && !record.missingProviderUpload(err) {
+		return err
 	}
 	return lock.remove(ctx, record.ID)
+}
+
+func (r uploadRecord) missingProviderUpload(err error) bool {
+	return errorCode(err, "NoSuchUpload") || (r.CreateOnly && errors.Is(err, ErrNotFound))
 }
 
 func (r uploadRecord) abortRequest() *s3.AbortMultipartUploadInput {

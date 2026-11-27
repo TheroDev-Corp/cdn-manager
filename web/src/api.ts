@@ -12,7 +12,7 @@ export type Upload = { id: string; partSize: number; parts?: { number: number; s
 type Params = Record<string, string | undefined>
 
 export class HTTPError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(readonly status: number, message: string, readonly code?: string) {
     super(message)
   }
 }
@@ -25,22 +25,30 @@ export function endpoint(path: string, params?: Params) {
   return '/api/v1' + path + (query.size ? '?' + query.toString() : '')
 }
 
-async function request(path: string, params?: Params, options: RequestInit = {}) {
+async function fetchAPI(path: string, params?: Params, options: RequestInit = {}) {
   const response = await fetch(endpoint(path, params), options)
   if (!response.ok) {
     const error = await response.json().catch(() => null)
     const message = error?.message ?? error?.error?.message ?? error?.error
-    throw new HTTPError(response.status, typeof message === 'string' ? message : response.statusText || String(response.status))
+    throw new HTTPError(response.status, typeof message === 'string' ? message : response.statusText || String(response.status), error?.code)
   }
   return response
 }
 
-async function json<T>(path: string, params?: Params, options?: RequestInit): Promise<T> {
-  const response = await request(path, params, options)
-  return response.status === 204 ? undefined as T : response.json()
-}
+export function api(csrfToken = '', onUnauthorized?: () => void) {
+  async function request(path: string, params?: Params, options?: RequestInit) {
+    try { return await fetchAPI(path, params, options) }
+    catch (error) {
+      if (error instanceof HTTPError && error.status === 401) onUnauthorized?.()
+      throw error
+    }
+  }
 
-export function api(csrfToken = '') {
+  async function json<T>(path: string, params?: Params, options?: RequestInit): Promise<T> {
+    const response = await request(path, params, options)
+    return response.status === 204 ? undefined as T : response.json()
+  }
+
   function mutation(method: string, body?: unknown): RequestInit {
     const headers: Record<string, string> = { 'X-CSRF-Token': csrfToken }
     if (body !== undefined) headers['Content-Type'] = 'application/json'
@@ -57,7 +65,9 @@ export function api(csrfToken = '') {
     savePolicy: (bucket: Bucket, policy: string) => request('/bucket-policy', bucket, mutation('PUT', {policy})),
     objects: (bucket: Bucket, prefix: string, cursor: string | undefined, signal: AbortSignal) =>
       json<Page>('/objects', {...bucket, prefix, cursor}, {signal}),
-    stat: (object: ObjectRef) => json<ObjectInfo>('/object', object),
+    stat: (object: ObjectRef, signal?: AbortSignal) => json<ObjectInfo>('/object', object, {signal}),
+    createFolder: (bucket: Bucket, prefix: string, name: string) =>
+      request('/folders', bucket, mutation('POST', {prefix, name})),
     cdn: (object: ObjectRef) => json<{url: string}>('/cdn-url', object),
     cdnStatus: (object: ObjectRef) => json<{available: boolean; status?: number}>('/cdn-status', object),
     presign: (object: ObjectRef, ttlSeconds: number) => json<{url: string}>('/presign', object, mutation('POST', {ttlSeconds})),
@@ -68,10 +78,12 @@ export function api(csrfToken = '') {
     remove: (object: ObjectRef) => request('/object', object, mutation('DELETE')),
     removeMany: (bucket: Bucket, keys: string[]) => json<{results: {key: string; error?: string}[]}>('/delete', bucket, mutation('POST', {keys})),
     zip: (bucket: Bucket, keys: string[]) => request('/zip', bucket, mutation('POST', {keys})),
-    putObject: (object: ObjectRef, body: File, signal: AbortSignal) =>
-      request('/object', object, {method: 'PUT', headers: {'X-CSRF-Token': csrfToken, 'Content-Type': body.type || 'application/octet-stream'}, body, signal}),
-    start: (object: ObjectRef, file: File, signal: AbortSignal) =>
-      json<Upload>('/uploads', object, {...mutation('POST', {size: file.size, contentType: file.type || 'application/octet-stream'}), signal}),
+    putObject: (object: ObjectRef, body: File, createOnly: boolean, signal: AbortSignal) =>
+      request('/object', {...object, createOnly: createOnly ? 'true' : undefined}, {
+        method: 'PUT', headers: {'X-CSRF-Token': csrfToken, 'Content-Type': body.type || 'application/octet-stream'}, body, signal,
+      }),
+    start: (object: ObjectRef, file: File, createOnly: boolean, signal: AbortSignal) =>
+      json<Upload>('/uploads', object, {...mutation('POST', {size: file.size, contentType: file.type || 'application/octet-stream', createOnly}), signal}),
     upload: (id: string, signal: AbortSignal) => json<Upload>('/uploads/' + encodeURIComponent(id), undefined, {signal}),
     part: (id: string, number: number, body: Blob, signal: AbortSignal) =>
       request('/uploads/' + encodeURIComponent(id) + '/parts/' + number, undefined, {

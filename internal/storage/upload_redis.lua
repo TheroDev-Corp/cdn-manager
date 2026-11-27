@@ -91,6 +91,12 @@ if not owns_exclusive(token, now) then return 'busy' end
 
 if action == 'prepare' then
     local next_state, manifest = ARGV[4], ARGV[5]
+    if next_state == 'active' then
+        if state ~= 'completing' then return 'conflict' end
+        redis.call('HSET', upload, 'phase', 'active')
+        redis.call('HDEL', upload, 'manifest')
+        return 'ok'
+    end
     if state == next_state then
         if redis.call('HGET', upload, 'manifest') == manifest then return 'ok' end
         return 'conflict'

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import '@fontsource-variable/geologica/wght.css'
 import '@fontsource/fira-mono/cyrillic-400.css'
@@ -21,27 +21,46 @@ function Brand() {
 }
 
 function App() {
-  const session = useQuery({queryKey: ['session'], queryFn: () => api().session(), staleTime: 60_000})
-  if (session.data) return <Workspace key={session.data.subject} session={session.data} />
+  const cache = useQueryClient()
+  const session = useQuery({queryKey: ['session'], queryFn: async () => {
+    const next = await api().session()
+    const previous = cache.getQueryData<Session>(['session'])
+    if (previous && previous.subject !== next.subject) cache.removeQueries({predicate: query => query.queryKey[0] !== 'session'})
+    return next
+  }, staleTime: 60_000, refetchInterval: 30_000})
   const needsLogin = session.error instanceof HTTPError && session.error.status === 401
+  useEffect(() => {
+    if (needsLogin) cache.removeQueries({predicate: query => query.queryKey[0] !== 'session'})
+  }, [cache, needsLogin])
+  if (session.data && !needsLogin) return <Workspace key={session.data.subject} session={session.data} />
   return <main className="entry">
     <Brand />
     <div className="entry-card">
       {session.isPending ? <p role="status">Checking session…</p> : needsLogin ? <>
         <h1>Sign in to CDN Manager</h1>
-        <p>Access your storage sources and share public CDN links.</p>
+        <p>{session.data ? 'Your session ended. Sign in again to resume your uploads.' : 'Access your storage sources and share public CDN links.'}</p>
         <a className="button primary" href="/auth/login">Continue with single sign-on</a>
       </> : <Failure error={session.error} retry={() => void session.refetch()} />}
     </div>
   </main>
 }
 
+type StorageScope = {source: string; buckets: Record<string, string>}
+
+function readStorageScope(key: string): StorageScope {
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) ?? 'null')
+    if (typeof saved?.source === 'string' && saved.buckets && typeof saved.buckets === 'object') return saved
+  } catch { /* Browser storage is optional. */ }
+  return {source: '', buckets: {}}
+}
+
 function Workspace({session}: {session: Session}) {
-  const client = api(session.csrfToken)
   const cache = useQueryClient()
+  const client = api(session.csrfToken, () => void cache.invalidateQueries({queryKey: ['session']}, {cancelRefetch: false}))
   const sources = useQuery({queryKey: ['sources'], queryFn: client.sources, refetchInterval: 30_000})
-  const [sourceID, selectSource] = useState('')
-  const [bucketName, selectBucket] = useState('')
+  const scopeKey = 'cdn-manager:storage-scope:' + session.subject
+  const [scope, setScope] = useState(() => readStorageScope(scopeKey))
   const [tab, setTab] = useState<'objects' | 'transfers'>('objects')
   const [mcpSettings, setMcpSettings] = useState(false)
   const transferTab = useRef<HTMLButtonElement>(null)
@@ -49,13 +68,22 @@ function Workspace({session}: {session: Session}) {
   const [newBucket, setNewBucket] = useState('')
   const [error, setError] = useState<unknown>()
   const [busy, setBusy] = useState(false)
-  const source = (sources.data?.sources ?? []).find(value => value.id === sourceID) ?? sources.data?.sources?.[0]
+  const source = (sources.data?.sources ?? []).find(value => value.id === scope.source) ?? sources.data?.sources?.[0]
   const buckets = useQuery({
     queryKey: ['buckets', source?.id],
     queryFn: () => client.buckets(source!.id),
     enabled: !!source,
   })
+  const bucketName = source ? scope.buckets[source.id] : undefined
   const activeBucket = (buckets.data?.buckets ?? []).find(value => value.name === bucketName) ?? buckets.data?.buckets?.[0]
+  const saveScope = (next: StorageScope) => {
+    setScope(next)
+    try { localStorage.setItem(scopeKey, JSON.stringify(next)) }
+    catch { /* The selection still works in this tab. */ }
+  }
+  const selectBucket = (name: string) => {
+    if (source) saveScope({source: source.id, buckets: {...scope.buckets, [source.id]: name}})
+  }
   const transfers = useTransfers(client, session.subject, object => {
     void cache.invalidateQueries({queryKey: ['objects', {source: object.source, bucket: object.bucket}]})
   })
@@ -91,8 +119,7 @@ function Workspace({session}: {session: Session}) {
       <div className="scope-group">
         <label htmlFor="source-select">Storage source</label>
         <select id="source-select" value={source?.id ?? ''} disabled={!source} onChange={event => {
-          selectSource(event.target.value)
-          selectBucket('')
+          saveScope({...scope, source: event.target.value})
           setError(undefined)
           setTab('objects')
         }}>
@@ -133,7 +160,7 @@ function Workspace({session}: {session: Session}) {
       {!create && error !== undefined && <Failure error={error} />}
       {tab === 'transfers' && <>
         <header className="title"><h1>Transfers</h1></header>
-        <Transfers transfers={transfers} />
+        <Transfers client={client} transfers={transfers} />
       </>}
       <section hidden={tab !== 'objects'} aria-label="Objects">
         {(!source || !activeBucket) && <header className="title"><h1>Objects</h1></header>}

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,21 +27,23 @@ const MaxTextBytes = 1 << 20
 const MaxSinglePutBytes = 64 << 20
 
 var (
-	ErrInvalid     = errors.New("invalid storage request")
-	ErrNotFound    = errors.New("storage resource not found")
-	ErrConflict    = errors.New("storage resource conflict")
-	ErrUnsupported = errors.New("storage operation is disabled")
-	ErrTooLarge    = errors.New("storage request is too large")
-	ErrBusy        = errors.New("storage transfer capacity reached")
+	ErrInvalid      = errors.New("invalid storage request")
+	ErrNotFound     = errors.New("storage resource not found")
+	ErrConflict     = errors.New("storage resource conflict")
+	ErrObjectExists = errors.New("an object already exists at this key")
+	ErrUnsupported  = errors.New("storage operation is disabled")
+	ErrTooLarge     = errors.New("storage request is too large")
+	ErrBusy         = errors.New("storage transfer capacity reached")
 )
 
 type Capabilities struct {
-	Multipart         bool `json:"multipart"`
-	ConditionalWrites bool `json:"conditionalWrites"`
-	Versions          bool `json:"versions"`
-	BucketManagement  bool `json:"bucketManagement"`
-	BucketPolicies    bool `json:"bucketPolicies"`
-	Presign           bool `json:"presign"`
+	Multipart          bool `json:"multipart"`
+	ConditionalWrites  bool `json:"conditionalWrites"`
+	ConditionalCreates bool `json:"conditionalCreates"`
+	Versions           bool `json:"versions"`
+	BucketManagement   bool `json:"bucketManagement"`
+	BucketPolicies     bool `json:"bucketPolicies"`
+	Presign            bool `json:"presign"`
 }
 
 type SourceConfig struct {
@@ -329,6 +332,35 @@ func (s *Source) Get(ctx context.Context, bucket, key, version, rangeHeader stri
 }
 
 func (s *Source) Put(ctx context.Context, bucket, key, contentType string, body io.Reader, size int64) (Object, error) {
+	return s.put(ctx, bucket, key, contentType, body, size, false)
+}
+
+func (s *Source) PutNew(ctx context.Context, bucket, key, contentType string, body io.Reader, size int64) (Object, error) {
+	return s.put(ctx, bucket, key, contentType, body, size, true)
+}
+
+func (s *Source) CreateFolder(ctx context.Context, bucket, prefix, name string) error {
+	if name == "" || name == "." || name == ".." || name != strings.TrimSpace(name) ||
+		strings.ContainsAny(name, `/\`) || strings.ContainsFunc(name, unicode.IsControl) ||
+		(prefix != "" && !strings.HasSuffix(prefix, "/")) {
+		return ErrInvalid
+	}
+	key := prefix + name + "/"
+	if err := s.checkObject(bucket, key, ""); err != nil {
+		return err
+	}
+	page, err := s.List(ctx, bucket, key, "", "", 1)
+	if err != nil {
+		return err
+	}
+	if len(page.Objects) != 0 {
+		return ErrObjectExists
+	}
+	_, err = s.PutNew(ctx, bucket, key, "application/x-directory", strings.NewReader(""), 0)
+	return err
+}
+
+func (s *Source) put(ctx context.Context, bucket, key, contentType string, body io.Reader, size int64, createOnly bool) (Object, error) {
 	if err := s.checkObject(bucket, key, ""); err != nil {
 		return Object{}, err
 	}
@@ -348,11 +380,48 @@ func (s *Source) Put(ctx context.Context, bucket, key, contentType string, body 
 		return Object{}, err
 	}
 	defer removeSpool(file)
-	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{Bucket: &bucket, Key: &key, ContentType: optional(contentType), Body: file, ContentLength: &size})
+	condition, err := s.createCondition(ctx, bucket, key, createOnly)
 	if err != nil {
-		return Object{}, s3Error(err)
+		return Object{}, err
+	}
+	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: &bucket, Key: &key, ContentType: optional(contentType), Body: file, ContentLength: &size, IfNoneMatch: condition,
+	})
+	if err != nil {
+		return Object{}, createError(err, condition)
 	}
 	return Object{Key: key, Size: size, ContentType: contentType, ETag: aws.ToString(out.ETag), VersionID: aws.ToString(out.VersionId)}, nil
+}
+
+func (s *Source) requireMissing(ctx context.Context, bucket, key string) error {
+	_, err := s.Stat(ctx, bucket, key, "")
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err == nil {
+		return ErrObjectExists
+	}
+	return err
+}
+
+func (s *Source) createCondition(ctx context.Context, bucket, key string, createOnly bool) (*string, error) {
+	if !createOnly {
+		return nil, nil
+	}
+	if s.config.Capabilities.ConditionalCreates {
+		return aws.String("*"), nil
+	}
+	return nil, s.requireMissing(ctx, bucket, key)
+}
+
+func createError(err error, condition *string) error {
+	if condition != nil {
+		var response *smithyhttp.ResponseError
+		if errors.As(err, &response) && response.HTTPStatusCode() == 412 {
+			return errors.Join(ErrObjectExists, err)
+		}
+	}
+	return s3Error(err)
 }
 
 type Text struct {

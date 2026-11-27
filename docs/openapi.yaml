@@ -203,6 +203,33 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '502': { $ref: '#/components/responses/GatewayError' }
+  /api/v1/folders:
+    parameters: *bucketSelectors
+    post:
+      operationId: createFolder
+      summary: Create an empty folder in a bucket or existing prefix
+      security:
+        - webSession: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                prefix: { type: string, description: Empty for the bucket root or ending in a slash. }
+                name: { type: string, minLength: 1, description: A single folder name. }
+      responses:
+        '201': { description: Folder created }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/Busy' }
+        '502': { $ref: '#/components/responses/GatewayError' }
   /api/v1/object:
     parameters: &objectSelectors
       - $ref: '#/components/parameters/Source'
@@ -224,6 +251,11 @@ paths:
       operationId: putObject
       summary: Upload or replace one object up to 64 MiB
       description: Set Content-Length to the exact payload length and Content-Type to the object media type. Use multipart for larger objects.
+      parameters:
+        - name: createOnly
+          in: query
+          description: Check that the key is free before writing. Atomic on sources with conditional creates enabled.
+          schema: { type: boolean, default: false }
       security:
         - webSession: []
           csrfHeader: []
@@ -238,6 +270,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '413': { $ref: '#/components/responses/TooLarge' }
         '429': { $ref: '#/components/responses/Busy' }
         '502': { $ref: '#/components/responses/GatewayError' }
@@ -556,12 +589,17 @@ paths:
               properties:
                 size: { type: integer, format: int64, minimum: 1, maximum: 671088640000 }
                 contentType: { type: string }
+                createOnly:
+                  type: boolean
+                  default: false
+                  description: Check that the key is free at start and completion. Completion is atomic on sources with conditional creates enabled.
       responses:
         '201': { $ref: '#/components/responses/Upload' }
         '400': { $ref: '#/components/responses/Invalid' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
         '413': { $ref: '#/components/responses/TooLarge' }
         '422': { $ref: '#/components/responses/Unsupported' }
         '502': { $ref: '#/components/responses/GatewayError' }
@@ -713,7 +751,7 @@ components:
       description: The resource was missing, inaccessible to the caller, or an unfinished upload expired.
       content: *errorContent
     Conflict:
-      description: The object revision, bucket, or upload state conflicted with the operation.
+      description: The object revision, bucket, or upload state conflicted with the operation. The `object_exists` code identifies an occupied destination.
       content: *errorContent
     TooLarge:
       description: The body, object, or requested upload exceeds the size limit.
@@ -791,6 +829,7 @@ components:
       required: [message]
       properties:
         message: { type: string }
+        code: { type: string }
     Binary:
       type: string
       format: binary

@@ -47,6 +47,7 @@ func Mount(router chi.Router, backend *service.Backend, auth WebAuth) {
 		router.Put("/bucket-policy", a.handle(a.bucketPolicy))
 		router.Delete("/bucket-policy", a.handle(a.bucketPolicy))
 		router.Get("/objects", a.handle(a.list))
+		router.Post("/folders", a.handle(a.createFolder))
 		router.Get("/object", a.handle(a.stat))
 		router.Put("/object", a.handle(a.put))
 		router.Delete("/object", a.handle(a.deleteObject))
@@ -181,6 +182,8 @@ func writeFailure(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "You do not have permission for this operation.")
 	case errors.Is(err, storage.ErrNotFound):
 		writeError(w, http.StatusNotFound, "The requested resource was not found.")
+	case errors.Is(err, storage.ErrObjectExists):
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "object_exists", "message": "An object already exists at this destination."})
 	case errors.Is(err, storage.ErrConflict):
 		writeError(w, http.StatusConflict, "The object or upload changed. Refresh its status before retrying.")
 	case errors.Is(err, storage.ErrUnsupported):

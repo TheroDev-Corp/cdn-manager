@@ -286,6 +286,8 @@ func publicRoutes(backend *service.Backend, provider *auth.Provider, metrics *te
 	files := http.FileServerFS(assets)
 	router.Get("/", files.ServeHTTP)
 	router.Head("/", files.ServeHTTP)
+	router.Get("/favicon.ico", files.ServeHTTP)
+	router.Head("/favicon.ico", files.ServeHTTP)
 	serveAsset := func(w http.ResponseWriter, r *http.Request) {
 		if info, err := fs.Stat(assets, r.URL.Path[1:]); err != nil || info.IsDir() {
 			http.NotFound(w, r)

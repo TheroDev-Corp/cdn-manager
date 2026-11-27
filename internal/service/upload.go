@@ -21,6 +21,10 @@ func uploadResponse(upload storage.Upload) Upload {
 }
 
 func (b *Backend) StartUpload(ctx context.Context, actor Actor, ref Ref, contentType string, size int64) (_ Upload, err error) {
+	return b.StartUploadWithPolicy(ctx, actor, ref, contentType, size, false)
+}
+
+func (b *Backend) StartUploadWithPolicy(ctx context.Context, actor Actor, ref Ref, contentType string, size int64, createOnly bool) (_ Upload, err error) {
 	defer func() { b.Audit(ctx, actor, "start_upload", ref, err) }()
 	if _, err := b.Authorize(actor, ref.Source, Write); err != nil {
 		return Upload{}, err
@@ -28,7 +32,11 @@ func (b *Backend) StartUpload(ctx context.Context, actor Actor, ref Ref, content
 	if ref.VersionID != "" {
 		return Upload{}, storage.ErrInvalid
 	}
-	upload, err := b.store.StartUpload(ctx, actor.Subject, ref.Source, ref.Bucket, ref.Key, contentType, size)
+	start := b.store.StartUpload
+	if createOnly {
+		start = b.store.StartNewUpload
+	}
+	upload, err := start(ctx, actor.Subject, ref.Source, ref.Bucket, ref.Key, contentType, size)
 	return uploadResponse(upload), err
 }
 

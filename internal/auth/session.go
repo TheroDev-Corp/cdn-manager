@@ -97,18 +97,16 @@ func (p *Provider) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid sign-in token", http.StatusUnauthorized)
 		return
 	}
-	now := time.Now()
-	expires := now.Add(p.sessionTTL)
-	if verified.Expiry.Before(expires) {
-		expires = verified.Expiry
-	}
+	// The verified ID token authenticates this sign-in. The resulting web
+	// session uses its own configured lifetime in both the store and cookie.
+	expires := time.Now().Add(p.sessionTTL)
 	value := session{Actor: claims.actor(verified.Subject, "web"), CSRF: newToken()}
 	id, err := p.sessions.issue(r.Context(), value, expires, p.cookie(r, "session"), "")
 	if err != nil {
 		http.Error(w, "Sign-in temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	p.setCookie(w, "session", id, max(1, int(expires.Sub(now).Seconds())))
+	p.setCookie(w, "session", id, int(p.sessionTTL.Seconds()))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 

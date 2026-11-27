@@ -95,6 +95,12 @@ func TestRedisS3Multipart(t *testing.T) {
 	if err := lock.prepare(ctx, "completing", digest[:]); err != nil {
 		t.Fatal(err)
 	}
+	if err := lock.prepare(ctx, "active", nil); err != nil || lock.phase() != "active" {
+		t.Fatalf("release rejected completion: state=%s err=%v", lock.phase(), err)
+	}
+	if err := lock.prepare(ctx, "completing", digest[:]); err != nil {
+		t.Fatal(err)
+	}
 	record, err := journal.read(ctx, upload.ID)
 	if err != nil {
 		t.Fatal(err)

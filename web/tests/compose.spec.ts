@@ -34,6 +34,89 @@ async function ready() {
   }, {timeout: 25_000}).toBe(200)
 }
 
+test('creates nested folders and renames a conflicting file on Garage', async ({page, browser}) => {
+  await page.goto('/')
+  await expect(page.getByRole('link', {name: 'Continue with single sign-on'})).toBeVisible()
+  await expect(page.locator('link[rel=icon]')).toHaveAttribute('href', '/favicon.ico')
+  const icon = await page.request.get('/favicon.ico')
+  expect(icon.ok()).toBe(true)
+  expect((await icon.body()).subarray(0, 6)).toEqual(Buffer.from([0, 0, 1, 0, 3, 0]))
+  await login(page, 'Owner')
+  const sessionCookie = (await page.context().cookies()).find(cookie => cookie.name === 'cdn-manager-session')
+  expect(sessionCookie?.expires).toBeGreaterThan(Date.now() / 1000 + 7 * 60 * 60)
+  const root = 'workflows-' + randomUUID()
+  const folderDialog = page.getByRole('dialog', {name: 'Create folder'})
+  const createFolder = async (name: string) => {
+    await page.getByRole('button', {name: 'Create folder', exact: true}).click()
+    await folderDialog.getByLabel('Folder name').fill(name)
+    await folderDialog.getByRole('button', {name: 'Create folder', exact: true}).click()
+    await expect(folderDialog).toBeHidden()
+    await expect(page.getByRole('button', {name: name + '/', exact: true})).toBeVisible()
+  }
+  const pick = (body: string) => page.locator('input[type=file]:not([webkitdirectory])').setInputFiles({
+    name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from(body),
+  })
+  await page.getByLabel('Storage source').selectOption('media')
+  await page.reload()
+  await expect(page.getByLabel('Storage source')).toHaveValue('media')
+  await page.getByLabel('Storage source').selectOption('assets')
+  await createFolder(root)
+  await page.reload()
+  await page.getByRole('button', {name: root + '/', exact: true}).click()
+  await expect(page.getByText('This prefix is empty')).toBeVisible()
+  await createFolder('nested')
+  await page.getByRole('button', {name: 'Create folder', exact: true}).click()
+  await folderDialog.getByLabel('Folder name').fill('nested')
+  await folderDialog.getByRole('button', {name: 'Create folder', exact: true}).click()
+  await expect(folderDialog.getByRole('alert')).toContainText('already exists')
+  await folderDialog.getByRole('button', {name: 'Close'}).click()
+  await page.getByRole('button', {name: 'nested/', exact: true}).click()
+  await expect(page.getByText('This prefix is empty')).toBeVisible()
+  await pick('original')
+  await expect(page.getByText('complete · 8 B / 8 B')).toBeVisible()
+  await page.getByRole('button', {name: 'Objects', exact: true}).click()
+  await page.setViewportSize({width: 390, height: 844})
+  await pick('copy')
+  const conflict = page.getByRole('dialog', {name: 'Upload conflicts'})
+  await expect(conflict.getByLabel('New file name')).toHaveValue('notes (1).txt')
+  expect(await conflict.evaluate(dialog => dialog.scrollWidth)).toBeLessThanOrEqual(390)
+  await conflict.getByRole('button', {name: 'Continue upload'}).click()
+  await expect(page.getByText('complete · 4 B / 4 B')).toBeVisible()
+  for (const [name, expected] of [['notes.txt', 'original'], ['notes (1).txt', 'copy']]) {
+    const query = new URLSearchParams({source: 'assets', bucket: 'assets', key: `${root}/nested/${name}`})
+    const response = await page.request.get('/api/v1/download?' + query)
+    expect(response.ok()).toBe(true)
+    expect(await response.text()).toBe(expected)
+  }
+  const viewer = await browser.newPage()
+  try {
+    await login(viewer, 'Viewer')
+    await expect(viewer.getByRole('button', {name: 'Create folder', exact: true})).toHaveCount(0)
+    const {csrfToken} = await (await viewer.request.get('/api/v1/session')).json()
+    const denied = await viewer.request.post('/api/v1/folders?source=assets&bucket=assets', {
+      headers: {'X-CSRF-Token': csrfToken}, data: {prefix: '', name: 'denied'},
+    })
+    expect(denied.status()).toBe(403)
+  } finally { await viewer.close() }
+})
+
+test('keeps a Garage object that appears before multipart completion', async ({page}) => {
+  await login(page, 'Editor')
+  const {csrfToken} = await (await page.request.get('/api/v1/session')).json()
+  const headers = {'X-CSRF-Token': csrfToken}
+  const target = '?source=media&bucket=videos&key=late-conflict-' + randomUUID()
+  const started = await page.request.post('/api/v1/uploads' + target, {headers, data: {size: 4, createOnly: true}})
+  expect(started.status()).toBe(201)
+  const path = '/api/v1/uploads/' + (await started.json()).id
+  expect((await page.request.put(path + '/parts/1', {headers, data: Buffer.from('part')})).ok()).toBe(true)
+  expect((await page.request.put('/api/v1/object' + target, {headers, data: Buffer.from('first')})).status()).toBe(201)
+  const conflict = await page.request.post(path + '/complete', {headers})
+  expect(conflict.status()).toBe(409)
+  expect(await conflict.json()).toMatchObject({code: 'object_exists'})
+  expect(await (await page.request.get('/api/v1/download' + target)).text()).toBe('first')
+  expect((await page.request.delete(path, {headers})).status()).toBe(204)
+})
+
 async function mp4(directory: string, name: string) {
   await mkdir(directory, {recursive: true})
   const path = join(directory, name)
@@ -248,7 +331,7 @@ test('resumes a video across a manager restart and serves identical browser and 
   const durable = await (await page.request.get(uploadPath)).json()
   expect(durable.parts.map((part: {number: number}) => part.number)).toEqual([1])
   await page.getByRole('button', {name: /^Transfers/}).click()
-  const completed = page.waitForResponse(response => new URL(response.url()).pathname === uploadPath + '/complete')
+  const completed = page.waitForResponse(response => new URL(response.url()).pathname === uploadPath + '/complete', {timeout: 60_000})
   await page.locator('.pick-file input').setInputFiles(path)
   await expect(page.getByText('complete · 72 MiB / 72 MiB')).toBeVisible({timeout: 60_000})
   expect(attempts.filter(number => number === 1)).toHaveLength(1)

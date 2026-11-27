@@ -111,6 +111,29 @@ func (a *API) stat(w http.ResponseWriter, r *http.Request, actor service.Actor) 
 	return nil
 }
 
+func (a *API) createFolder(w http.ResponseWriter, r *http.Request, actor service.Actor) (err error) {
+	ref := refFrom(r)
+	ctx := r.Context()
+	var body struct{ Prefix, Name string }
+	if err := decodeJSON(w, r, 8192, &body); err != nil {
+		return err
+	}
+	ref.Key = body.Prefix + body.Name + "/"
+	defer func() { a.backend.Audit(ctx, actor, "create_folder", ref, err) }()
+	source, err := a.backend.Authorize(actor, ref.Source, service.Write)
+	if err != nil {
+		return err
+	}
+	if ref.VersionID != "" {
+		return storage.ErrInvalid
+	}
+	if err := source.CreateFolder(ctx, ref.Bucket, body.Prefix, body.Name); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusCreated)
+	return nil
+}
+
 func (a *API) put(w http.ResponseWriter, r *http.Request, actor service.Actor) (err error) {
 	ref := refFrom(r)
 	ctx := r.Context()
@@ -122,8 +145,16 @@ func (a *API) put(w http.ResponseWriter, r *http.Request, actor service.Actor) (
 	if ref.VersionID != "" {
 		return storage.ErrInvalid
 	}
+	put := source.Put
+	switch r.URL.Query().Get("createOnly") {
+	case "true":
+		put = source.PutNew
+	case "", "false":
+	default:
+		return storage.ErrInvalid
+	}
 	finish := a.backend.BeginTransfer(ref.Source, "upload")
-	result, err := source.Put(ctx, ref.Bucket, ref.Key, r.Header.Get("Content-Type"), r.Body, r.ContentLength)
+	result, err := put(ctx, ref.Bucket, ref.Key, r.Header.Get("Content-Type"), r.Body, r.ContentLength)
 	finish(result.Size, err)
 	if err != nil {
 		return err
