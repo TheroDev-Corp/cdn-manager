@@ -4,6 +4,10 @@
   "required": ["replicaCount", "state"],
   "properties": {
     "replicaCount": { "type": "integer", "minimum": 1 },
+    "podScrape": {
+      "type": "object",
+      "properties": { "enabled": { "type": "boolean" } }
+    },
     "state": {
       "type": "object",
       "required": ["mode", "redisSecretKey", "redisPrefix", "spoolSize"],

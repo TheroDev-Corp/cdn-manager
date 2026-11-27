@@ -78,7 +78,7 @@ The manager runs as UID/GID 65534 with a read-only root filesystem. Each Redis-m
 
 The web and MCP listener defaults to `:8080`. The internal listener defaults to `:9090` and serves `/livez`, `/readyz`, `/metrics`, and `/sources/health`. Keep the internal listener on your monitoring network. In Redis mode, readiness checks the shared state service. A Redis outage removes manager replicas from service while liveness stays healthy. Source health is tracked separately so an S3 failure leaves healthy sources usable.
 
-Enable `serviceMonitor.enabled` if your monitoring stack supports the ServiceMonitor CRD. Import the [API, SSO and MCP dashboard](observability/grafana/api.json) and [source transfer dashboard](observability/grafana/transfers.json) with a Prometheus-compatible datasource. Public cache and playback metrics come from the CDN gateway.
+Enable `podScrape.enabled` for collectors that discover `prometheus.io` Pod annotations. The chart advertises `/metrics` on the internal port `9090` on each manager Pod. Use `serviceMonitor.enabled` for deployments that discover targets through the ServiceMonitor CRD. Choose one discovery method per collector to avoid duplicate scrapes. Import the [API, SSO and MCP dashboard](observability/grafana/api.json) and [source transfer dashboard](observability/grafana/transfers.json) with a Prometheus-compatible datasource. Public cache and playback metrics come from the CDN gateway.
 
 ## Build and test
 

@@ -40,6 +40,14 @@ jobs:
         run: |
           helm lint charts/cdn-manager
           helm template cdn-manager charts/cdn-manager --namespace fixture --set ingress.enabled=true --set ingress.tlsSecretName=fixture-tls --set serviceMonitor.enabled=true --set valkey.enabled=true --set valkey.existingSecret=fixture-valkey >/tmp/manifests.yaml
+          helm template cdn-manager charts/cdn-manager --set podScrape.enabled=true --show-only templates/deployment.yaml >/tmp/pod-scrape.yaml
+          grep -Ex '        prometheus\.io/scrape: "true"[[:space:]]*' /tmp/pod-scrape.yaml
+          grep -Ex '        prometheus\.io/port: "9090"[[:space:]]*' /tmp/pod-scrape.yaml
+          grep -Ex '        prometheus\.io/path: "/metrics"[[:space:]]*' /tmp/pod-scrape.yaml
+          if grep -Fq 'prometheus.io/scrape:' /tmp/manifests.yaml; then
+            echo "The chart enabled Pod scraping by default." >&2
+            exit 1
+          fi
           helm template cdn-manager charts/cdn-manager --set state.mode=file --set replicaCount=1 --set persistence.existingClaim=cdn-manager-state >/tmp/standalone.yaml
           if helm template cdn-manager charts/cdn-manager --set state.mode=file >/dev/null 2>&1; then
             echo "The chart accepted multiple replicas in file mode." >&2

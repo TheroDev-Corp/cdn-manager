@@ -74,6 +74,10 @@ serviceMonitor:
   interval: 30s
   scrapeTimeout: 10s
 
+# For collectors that discover targets using prometheus.io Pod annotations.
+podScrape:
+  enabled: false
+
 resources:
   requests:
     cpu: 100m
