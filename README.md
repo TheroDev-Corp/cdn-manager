@@ -93,3 +93,4 @@ helm template cdn-manager charts/cdn-manager
 Install Node.js for Playwright and follow the [end-to-end acceptance guide](e2e/README.md) for the browser and media dependencies and the Compose tests. For a `dev` branch build, download the image artifact for your architecture from the corresponding Actions run, extract it, and load the enclosed archive, for example `docker load -i cdn-manager-linux-amd64.tar.gz`. The loaded image is tagged `cdn-manager:dev`.
 
 Licensed under [Apache-2.0](LICENSE).
+The bundled fonts use the SIL Open Font License 1.1. See [Geologica](web/public/assets/licenses/geologica-5.3.0.txt) and [Fira Mono](web/public/assets/licenses/fira-mono-5.3.0.txt).

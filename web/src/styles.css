@@ -14,9 +14,9 @@
   --positive: #227742;
   --sidebar: 232px;
   --pad: 32px;
-  --display: "Unbounded", system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, monospace;
-  font: 14px/1.45 "IBM Plex Sans", system-ui, sans-serif;
+  --sans: "Geologica Variable", system-ui, sans-serif;
+  --mono: "Fira Mono", ui-monospace, monospace;
+  font: 14px/1.45 var(--sans);
   color: var(--ink);
   background: var(--ground);
 }
@@ -25,12 +25,11 @@ body { margin: 0 }
 [hidden] { display: none !important }
 h1, h2, h3, p { margin: 0 }
 h1, h2 {
-  font-family: var(--display);
-  font-weight: 600;
+  font-weight: 650;
   line-height: 1.2;
   overflow-wrap: anywhere;
 }
-h1 { font-size: 25px; letter-spacing: -.035em; text-transform: uppercase }
+h1 { font-size: 25px; font-weight: 750; letter-spacing: -.025em; text-transform: uppercase }
 h2 { font-size: 16px }
 h3 { font-size: 15px; font-weight: 600 }
 button, input, select, textarea { font: inherit; color: inherit }
@@ -75,7 +74,7 @@ button.danger, .error { color: var(--danger) }
   padding: 0 24px;
 }
 .brand { display: flex; align-items: center; gap: 12px; white-space: nowrap }
-.brand strong { font: 600 13px/1.2 var(--display); letter-spacing: -.045em; text-transform: uppercase }
+.brand strong { font: 750 13px/1.2 var(--sans); letter-spacing: -.02em; text-transform: uppercase }
 .brand-mark { display: grid; gap: 3px; transform: skewY(-13deg); width: 23px; color: var(--accent) }
 .brand-mark i { height: 3px; background: currentColor }
 .brand-mark i:nth-child(2) { width: 18px }
