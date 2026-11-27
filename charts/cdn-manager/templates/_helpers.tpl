@@ -21,3 +21,11 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | 
 {{- define "cdn-manager.metricsName" -}}
 {{- printf "%s-metrics" (include "cdn-manager.fullname" . | trunc 55 | trimSuffix "-") -}}
 {{- end -}}
+
+{{- define "cdn-manager.valkeyName" -}}
+{{ include "cdn-manager.fullname" . | trunc 55 | trimSuffix "-" }}-valkey
+{{- end -}}
+
+{{- define "cdn-manager.redisPrefix" -}}
+{{ .Values.state.redisPrefix | default (printf "cdn-manager-%s" (printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 16)) }}
+{{- end -}}

@@ -110,8 +110,8 @@ func registerTools(s *Server, server *sdk.Server) {
 			return b.UploadStatus(ctx, token.Actor, input.ID)
 		})
 	addTool(s, server, "grant_upload_part", "Get an expiring HTTPS PUT credential for one multipart part.", service.Write,
-		func(_ context.Context, token auth.AccessToken, input partArgs) (transferResult, error) {
-			return s.grantPart(token, input)
+		func(ctx context.Context, token auth.AccessToken, input partArgs) (transferResult, error) {
+			return s.grantPart(ctx, token, input)
 		})
 	addTool(s, server, "complete_upload", "Complete the upload after every part has been sent.", service.Write,
 		func(ctx context.Context, token auth.AccessToken, input uploadArgs) (storage.Object, error) {

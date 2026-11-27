@@ -1,4 +1,4 @@
-{{- if not .Values.persistence.existingClaim }}
+{{- if and (eq .Values.state.mode "file") (not .Values.persistence.existingClaim) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/TheroDev-Corp/cdn-manager/internal/auth"
@@ -9,8 +11,8 @@ import (
 	"github.com/TheroDev-Corp/cdn-manager/internal/storage"
 )
 
-func (s *Server) grantPart(token auth.AccessToken, input partArgs) (transferResult, error) {
-	upload, err := s.backend.UploadForTransfer(token.Actor, input.ID)
+func (s *Server) grantPart(ctx context.Context, token auth.AccessToken, input partArgs) (transferResult, error) {
+	upload, err := s.backend.UploadForTransfer(ctx, token.Actor, input.ID)
 	if err != nil {
 		return transferResult{}, err
 	}
@@ -21,9 +23,12 @@ func (s *Server) grantPart(token auth.AccessToken, input partArgs) (transferResu
 		return transferResult{}, storage.ErrInvalid
 	}
 	size := min(upload.PartSize, upload.Size-int64(input.Number-1)*upload.PartSize)
-	grant, expires, ok := s.provider.IssueUploadGrant(token, upload.ID, input.Number, size, upload.ExpiresAt)
-	if !ok {
+	grant, expires, err := s.provider.IssueUploadGrant(ctx, token, upload.ID, input.Number, size, upload.ExpiresAt)
+	if errors.Is(err, auth.ErrUnauthorized) {
 		return transferResult{}, storage.ErrBusy
+	}
+	if err != nil {
+		return transferResult{}, err
 	}
 	return transferResult{
 		URL: s.provider.PublicURL() + TransferPath, Method: http.MethodPut,
@@ -43,6 +48,10 @@ func (s *Server) Transfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grant, err := s.provider.UploadGrant(r)
+	if errors.Is(err, auth.ErrStoreUnavailable) {
+		http.Error(w, "Upload authorization temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="cdn-manager upload part"`)
 		http.Error(w, "An upload grant is required", http.StatusUnauthorized)
@@ -67,6 +76,8 @@ func (s *Server) Transfer(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusConflict
 		case storage.ErrTooLarge:
 			status = http.StatusRequestEntityTooLarge
+		case storage.ErrJournalUnavailable:
+			status = http.StatusServiceUnavailable
 		case storage.ErrBusy:
 			status = http.StatusTooManyRequests
 			w.Header().Set("Retry-After", "1")

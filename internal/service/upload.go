@@ -32,13 +32,13 @@ func (b *Backend) StartUpload(ctx context.Context, actor Actor, ref Ref, content
 	return uploadResponse(upload), err
 }
 
-func (b *Backend) uploadRef(actor Actor, id string) (Ref, error) {
-	upload, err := b.UploadForTransfer(actor, id)
+func (b *Backend) uploadRef(ctx context.Context, actor Actor, id string) (Ref, error) {
+	upload, err := b.UploadForTransfer(ctx, actor, id)
 	return Ref{Source: upload.Source, Bucket: upload.Bucket, Key: upload.Key}, err
 }
 
-func (b *Backend) UploadForTransfer(actor Actor, id string) (Upload, error) {
-	upload, err := b.store.UploadRef(actor.Subject, id)
+func (b *Backend) UploadForTransfer(ctx context.Context, actor Actor, id string) (Upload, error) {
+	upload, err := b.store.UploadRef(ctx, actor.Subject, id)
 	if err != nil {
 		return Upload{}, err
 	}
@@ -47,7 +47,7 @@ func (b *Backend) UploadForTransfer(actor Actor, id string) (Upload, error) {
 }
 
 func (b *Backend) UploadStatus(ctx context.Context, actor Actor, id string) (Upload, error) {
-	ref, err := b.uploadRef(actor, id)
+	ref, err := b.uploadRef(ctx, actor, id)
 	if err != nil {
 		return Upload{}, err
 	}
@@ -56,7 +56,7 @@ func (b *Backend) UploadStatus(ctx context.Context, actor Actor, id string) (Upl
 }
 
 func (b *Backend) UploadPart(ctx context.Context, actor Actor, id string, number int32, body io.Reader, size int64) (result storage.UploadPart, err error) {
-	ref, err := b.uploadRef(actor, id)
+	ref, err := b.uploadRef(ctx, actor, id)
 	defer func() { b.Audit(ctx, actor, "upload_part", ref, err) }()
 	if err != nil {
 		return storage.UploadPart{}, err
@@ -67,7 +67,7 @@ func (b *Backend) UploadPart(ctx context.Context, actor Actor, id string, number
 }
 
 func (b *Backend) CompleteUpload(ctx context.Context, actor Actor, id string) (_ storage.Object, err error) {
-	ref, err := b.uploadRef(actor, id)
+	ref, err := b.uploadRef(ctx, actor, id)
 	defer func() { b.Audit(ctx, actor, "complete_upload", ref, err) }()
 	if err != nil {
 		return storage.Object{}, err
@@ -76,7 +76,7 @@ func (b *Backend) CompleteUpload(ctx context.Context, actor Actor, id string) (_
 }
 
 func (b *Backend) AbortUpload(ctx context.Context, actor Actor, id string) (err error) {
-	ref, err := b.uploadRef(actor, id)
+	ref, err := b.uploadRef(ctx, actor, id)
 	defer func() { b.Audit(ctx, actor, "abort_upload", ref, err) }()
 	if err != nil {
 		return err
