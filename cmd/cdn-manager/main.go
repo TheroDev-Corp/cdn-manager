@@ -287,8 +287,11 @@ func publicRoutes(backend *service.Backend, provider *auth.Provider, metrics *te
 	files := http.FileServerFS(assets)
 	router.Get("/", files.ServeHTTP)
 	router.Head("/", files.ServeHTTP)
-	router.Get("/favicon.ico", files.ServeHTTP)
-	router.Head("/favicon.ico", files.ServeHTTP)
+	router.Get("/favicon.svg", files.ServeHTTP)
+	router.Head("/favicon.svg", files.ServeHTTP)
+	legacyIcon := http.RedirectHandler("/favicon.svg", http.StatusTemporaryRedirect)
+	router.Get("/favicon.ico", legacyIcon.ServeHTTP)
+	router.Head("/favicon.ico", legacyIcon.ServeHTTP)
 	serveAsset := func(w http.ResponseWriter, r *http.Request) {
 		if info, err := fs.Stat(assets, r.URL.Path[1:]); err != nil || info.IsDir() {
 			http.NotFound(w, r)
