@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  IMAGE_REPOSITORY: ghcr.io/therodev-corp/cdn-manager
+
 jobs:
   checks:
     runs-on: ubuntu-24.04
@@ -85,80 +88,180 @@ jobs:
         run: docker compose down --volumes
 
   image:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        architecture: [amd64, arm64]
+    runs-on: ubuntu-24.04
+    outputs:
+      release-version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
         with:
-          context: .
-          platforms: linux/${{ matrix.architecture }}
-          load: true
-          tags: cdn-manager:dev
-      - name: Verify the image architecture and scratch runtime
-        env:
-          TARGET_ARCH: ${{ matrix.architecture }}
-        run: |
-          test "$(docker image inspect -f '{{.Os}}/{{.Architecture}}' cdn-manager:dev)" = "linux/$TARGET_ARCH"
-          test "$(docker image inspect -f '{{.Config.User}}' cdn-manager:dev)" = 65534:65534
-          test "$(docker image inspect -f '{{len .RootFS.Layers}}' cdn-manager:dev)" = 1
-      - name: Export the dev image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        env:
-          TARGET_ARCH: ${{ matrix.architecture }}
-        run: docker image save cdn-manager:dev | gzip >"cdn-manager-linux-$TARGET_ARCH.tar.gz"
-      - name: Upload the dev image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-        uses: actions/upload-artifact@v4
-        with:
-          name: cdn-manager-docker-linux-${{ matrix.architecture }}
-          path: cdn-manager-linux-${{ matrix.architecture }}.tar.gz
-          if-no-files-found: error
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'TheroDev-Corp/cdn-manager'
-    needs: [checks, image]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
+          persist-credentials: false
       - uses: azure/setup-helm@v4
+        if: github.ref_type == 'tag'
         with:
           version: v3.19.0
-      - name: Validate the tag and package the chart
+      - name: Validate the release tag and package the chart
+        if: github.ref_type == 'tag'
         id: version
         run: |
+          if [[ ! $GITHUB_REF_NAME =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Expected a stable vX.Y.Z release tag.' >&2
+            exit 1
+          fi
           version=${GITHUB_REF_NAME#v}
-          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          chart_version=$(helm show chart charts/cdn-manager | awk '$1 == "version:" {print $2}')
-          app_version=$(helm show chart charts/cdn-manager | awk '$1 == "appVersion:" {print $2}' | tr -d '"')
-          test "$version" = "$chart_version"
-          test "$version" = "$app_version"
+          chart=$(helm show chart charts/cdn-manager)
+          chart_version=$(awk '$1 == "version:" {print $2}' <<< "$chart")
+          app_version=$(awk '$1 == "appVersion:" {print $2}' <<< "$chart" | tr -d '"')
+          if [[ $version != "$chart_version" ]] || [[ $version != "$app_version" ]]; then
+            echo "Expected the chart version and appVersion to match $version." >&2
+            exit 1
+          fi
           helm package charts/cdn-manager --destination dist
-          printf 'tag=%s\n' "$version" >>"$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/therodev-corp/cdn-manager:${{ steps.version.outputs.tag }}
+          outputs: type=oci,dest=${{ runner.temp }}/cdn-manager.oci.tar
+          provenance: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Install OCI image tooling
+        run: |
+          if ! command -v skopeo >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y skopeo
+          fi
+      - name: Verify both platforms and their scratch runtime
+        shell: bash
+        run: |
+          image="oci-archive:$RUNNER_TEMP/cdn-manager.oci.tar"
+          skopeo inspect --raw "$image" | jq -e '
+            .mediaType == "application/vnd.oci.image.index.v1+json" and
+            ([.manifests[].platform | .os + "/" + .architecture] | sort) == ["linux/amd64", "linux/arm64"]'
+          for arch in amd64 arm64; do
+            skopeo --override-os linux --override-arch "$arch" inspect --config "$image" |
+              jq -e --arg arch "$arch" --arg revision "$GITHUB_SHA" '
+                .os == "linux" and .architecture == $arch and
+                .config.User == "65534:65534" and
+                .config.Entrypoint == ["/usr/local/bin/cdn-manager"] and
+                .config.Labels["org.opencontainers.image.revision"] == $revision and
+                (.rootfs.diff_ids | length) == 1'
+          done
+      - name: Export the dev images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        run: |
+          for arch in amd64 arm64; do
+            archive="$RUNNER_TEMP/cdn-manager-linux-$arch.tar"
+            skopeo --override-os linux --override-arch "$arch" copy \
+              "oci-archive:$RUNNER_TEMP/cdn-manager.oci.tar" "docker-archive:$archive:cdn-manager:dev"
+            gzip "$archive"
+          done
+      - name: Upload the amd64 dev image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-manager-docker-linux-amd64
+          path: ${{ runner.temp }}/cdn-manager-linux-amd64.tar.gz
+          if-no-files-found: error
+          overwrite: true
+      - name: Upload the arm64 dev image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-manager-docker-linux-arm64
+          path: ${{ runner.temp }}/cdn-manager-linux-arm64.tar.gz
+          if-no-files-found: error
+          overwrite: true
+      - name: Upload the verified OCI image
+        if: github.event_name == 'push' && github.repository == 'TheroDev-Corp/cdn-manager'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-manager-oci-image
+          path: ${{ runner.temp }}/cdn-manager.oci.tar
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+          compression-level: 0
+      - name: Upload the packaged release chart
+        if: steps.version.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-manager-release-chart
+          path: dist/*.tgz
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    if: github.event_name == 'push' && github.repository == 'TheroDev-Corp/cdn-manager'
+    needs: [checks, image]
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ghcr-publish-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cdn-manager-oci-image
+          path: ${{ runner.temp }}
+      - name: Install OCI image tooling
+        run: |
+          if ! command -v skopeo >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y skopeo
+          fi
+      - name: Publish and verify the OCI image index
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.image.outputs.release-version }}
+        run: |
+          tags=("$GITHUB_REF_NAME")
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            test "v$RELEASE_VERSION" = "$GITHUB_REF_NAME"
+            tags+=("$RELEASE_VERSION")
+          else
+            [[ $GITHUB_REF_NAME == dev || $GITHUB_REF_NAME == main ]]
+            head_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
+            if [[ $head_sha != "$GITHUB_SHA" ]]; then
+              echo "The $GITHUB_REF_NAME branch moved to $head_sha. Skipping publication of $GITHUB_SHA."
+              exit 0
+            fi
+          fi
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          image="oci-archive:$RUNNER_TEMP/cdn-manager.oci.tar"
+          index_digest=$(skopeo inspect --raw "$image" | sha256sum)
+          for tag in "${tags[@]}"; do
+            destination="docker://$IMAGE_REPOSITORY:$tag"
+            skopeo copy --all --preserve-digests "$image" "$destination"
+            test "$(skopeo inspect --raw "$destination" | sha256sum)" = "$index_digest"
+          done
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [image, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cdn-manager-release-chart
+          path: dist
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
       - name: Publish the chart and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_VERSION: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.image.outputs.release-version }}
         run: |
           printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           package="dist/cdn-manager-$RELEASE_VERSION.tgz"
           helm push "$package" oci://ghcr.io/therodev-corp/charts
-          gh release create "$GITHUB_REF_NAME" "$package" --verify-tag --generate-notes
+          gh release create "$GITHUB_REF_NAME" "$package" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

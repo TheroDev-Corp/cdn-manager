@@ -58,7 +58,7 @@ Viewers can read and share permanent CDN links. Editors can also upload and edit
 
 ### Helm chart
 
-Prepare a values file with your identity provider and sources, set `existingSecret` to the Secret that supplies the credential environment variables, and configure a TLS Secret if using the chart's Ingress. Set `image.repository` and `image.tag` if using an image other than the release image selected by the chart. The image must be available to the cluster. For a local cluster, you can import the dev image described below and set the repository to `cdn-manager` and the tag to `dev`. Allow multipart requests up to 64 MiB and stream ZIP and download responses through the ingress controller.
+Prepare a values file with your identity provider and sources, set `existingSecret` to the Secret that supplies the credential environment variables, and configure a TLS Secret if using the chart's Ingress. The default repository is `ghcr.io/therodev-corp/cdn-manager`. The chart selects the numbered release image by default. To follow a branch, set `image.tag` to `main` or `dev` and `image.pullPolicy` to `Always` so a new pod pulls the current image. For a local cluster, you can import the dev image described below and set `image.repository` to `cdn-manager` and `image.tag` to `dev`. Allow multipart requests up to 64 MiB and stream ZIP and download responses through the ingress controller.
 
 ```sh
 kubectl create namespace cdn-manager
@@ -68,7 +68,7 @@ helm upgrade --install cdn-manager ./charts/cdn-manager \
   --namespace cdn-manager --values /secure/path/values.yaml
 ```
 
-To install a packaged release, use `oci://ghcr.io/therodev-corp/charts/cdn-manager` in place of the local chart path and add `--version` with the matching published chart version. Tag builds publish Linux amd64 and arm64 images alongside the versioned chart. [CI and release workflow](.github/workflows/ci-release.yaml).
+To install a packaged release, use `oci://ghcr.io/therodev-corp/charts/cdn-manager` in place of the local chart path and add `--version` with the matching published chart version. A stable Git tag such as `v0.1.0` publishes `ghcr.io/therodev-corp/cdn-manager:v0.1.0` and the chart's matching numeric alias `0.1.0`, alongside the chart and GitHub release. Pushes to `main` and `dev` update the corresponding GHCR tag after CI passes. Each tag resolves to one OCI image index with Linux amd64 and arm64 images. [CI and release workflow](.github/workflows/ci-release.yaml).
 
 The runtime uses a scratch image with a CA certificate bundle and runs as UID/GID 65534. The chart uses a read-only root filesystem and a retained PVC for the multipart journal and part staging. Keep that volume writable and dedicate each state directory to one instance. For an existing claim owned by the previous UID/GID 65532, set all three `podSecurityContext` values (`runAsUser`, `runAsGroup`, and `fsGroup`) to 65532 until the volume is migrated.
 
