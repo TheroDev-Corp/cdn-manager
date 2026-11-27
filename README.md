@@ -32,7 +32,7 @@ The settings panel also shows the endpoint, Streamable HTTP transport, and regis
 ## Storage and sharing
 
 - **Browse files.** Navigate prefixes, load additional pages, filter loaded keys, and sort the loaded results. Inspect object metadata, download individual files, or stream selected files as a ZIP. Bulk deletion reports failures per object.
-- **Upload files and folders.** Sources with multipart enabled support progress, part retries, and recovery across manager restarts. The manager keeps the session in Redis or in the standalone file journal and checks S3 for completed parts before resuming.
+- **Upload files and folders.** Before writing, the browser checks the exact destination keys and offers to rename, skip, or replace conflicts. Create folder adds an empty prefix. Sources with multipart enabled support progress, part retries, and recovery across manager restarts.
 - **Edit text.** Edit supported text formats such as JSON and CSS up to 1 MiB on sources that support atomic conditional writes. A conflicting save preserves the user's draft. Conditional writes are disabled in the Garage demo.
 - **Share a permanent link.** The configured CDN route maps a key to its origin. Test its availability from the manager in the object's details. A separate, expiring S3 link requires presign permission and an S3 endpoint the recipient can reach.
 - **Respect provider capabilities.** Object versions, bucket creation and deletion, and bucket policy editing depend on both the provider and the source configuration. [Provider compatibility matrix and parity gaps](docs/compatibility.md).
@@ -47,10 +47,13 @@ Set `CDN_MANAGER_CONFIG` to a JSON file. See the [Compose example](e2e/demo/conf
 | --- | --- |
 | `auth.publicUrl` | HTTPS origin of the manager. Register the exact origin plus `/auth/callback` as the web OAuth redirect URI. |
 | `auth.oidcIssuer`, `oidcClientId`, `oidcClientSecretEnv` | Web OIDC provider, client ID, and client secret environment variable. The ID token must include the user's `groups` claim. |
+| `auth.sessionTtl` | Lifetime of the manager's web session after OIDC sign-in, with a default of `8h`. Group membership is read at sign-in. |
 | `auth.mcpIssuer`, `mcpAudience`, `mcpScopes` | MCP issuer, dedicated OAuth client ID used as the audience, and allowed scopes such as `read`, `write`, and `delete`. |
 | `sources[].id`, `endpoint`, `region`, `pathStyle`, `buckets` | Stable ID, S3 endpoint, signing region, addressing style, and explicit bucket allowlist. |
 | `sources[].accessKeyEnv`, `secretKeyEnv`, `sessionTokenEnv` | Environment variable names for S3 credentials. The session token is optional. |
 | `sources[].roles`, `capabilities` | Identity-provider groups mapped to `viewer`, `editor`, and `admin`, plus explicitly enabled provider capabilities. |
+
+Enable `sources[].capabilities.conditionalCreates` after verifying that the source enforces `If-None-Match: *` on PUT and on multipart completion if enabled. Other sources check the key just before writing. A competing write can still occur in the gap between the check and the write.
 | `sources[].cdnUrl`, `cdnProbeUrl` | CDN URL template with exactly one `{key}` in the path and an optional `{bucket}`. Set `cdnProbeUrl` if the manager reaches the gateway through a separate route. |
 | `sources[].listingEncoding` | List response decoding. The default, `path`, preserves literal plus signs. Set `form` for SeaweedFS 4.55, which encodes spaces as plus signs. |
 

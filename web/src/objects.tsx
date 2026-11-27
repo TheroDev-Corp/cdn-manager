@@ -3,12 +3,13 @@ import { useEffect, useRef, useState } from 'react'
 import { endpoint, type Bucket, type Client, type ObjectRef, type Source } from './api'
 import { CopyField, Failure, Modal, ObjectDetail } from './detail'
 import { formatBytes, formatDate } from './format'
+import { inspectUploads, UploadConflicts, type UploadConflict, type UploadTarget } from './upload-conflicts'
 
 type Entry = {key: string; folder: boolean; size?: number; lastModified?: string}
 
 export function Objects({source, bucket, client, csrfToken, enqueue}: {
   source: Source; bucket: Bucket; client: Client; csrfToken: string;
-  enqueue: (entries: {file: File; object: ObjectRef}[]) => void
+  enqueue: (entries: UploadTarget[]) => void
 }) {
   const [prefix, setPrefix] = useState('')
   const [search, setSearch] = useState('')
@@ -21,10 +22,15 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
   const [error, setError] = useState<unknown>()
   const [failures, setFailures] = useState<{key: string; error?: string}[]>([])
   const [busy, setBusy] = useState(false)
+  const [checking, setChecking] = useState(false)
+  const [review, setReview] = useState<{targets: UploadTarget[]; conflicts: UploadConflict[]}>()
+  const [folder, setFolder] = useState(false)
+  const preflight = useRef<AbortController>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const folderInput = useRef<HTMLInputElement>(null)
   const objectHeading = useRef<HTMLHeadingElement>(null)
   const queryClient = useQueryClient()
+  useEffect(() => () => preflight.current?.abort(), [])
   const query = useInfiniteQuery({
     queryKey: ['objects', bucket, prefix],
     initialPageParam: undefined as string | undefined,
@@ -34,7 +40,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
   const pages = query.data?.pages ?? []
   const entries: Entry[] = pages.flatMap(page => [
     ...(page.prefixes ?? []).map(key => ({key, folder: true})),
-    ...(page.objects ?? []).map(item => ({...item, folder: false})),
+    ...(page.objects ?? []).filter(item => item.key !== prefix || item.size !== 0).map(item => ({...item, folder: false})),
   ])
   const visible = entries.filter(entry => entry.key.slice(prefix.length).toLocaleLowerCase().includes(search.toLocaleLowerCase())).sort((a, b) => {
     if (a.folder !== b.folder) return a.folder ? -1 : 1
@@ -48,6 +54,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
   const refresh = () => void queryClient.invalidateQueries({queryKey: ['objects', bucket]})
 
   function browse(next: string) {
+    preflight.current?.abort()
     setPrefix(next)
     setSearch('')
     setSelected([])
@@ -56,11 +63,33 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
     objectHeading.current?.focus()
   }
 
-  function addFiles(input: HTMLInputElement) {
+  async function addFiles(input: HTMLInputElement) {
     const files = Array.from(input.files ?? [])
-    enqueue(files.map(file => ({file, object: {...bucket, key: prefix + (file.webkitRelativePath || file.name)}})))
     input.value = ''
+    if (files.length === 0) return
+    preflight.current?.abort()
+    const controller = new AbortController()
+    preflight.current = controller
+    setChecking(true)
+    setError(undefined)
+    const targets = files.map(file => ({file, object: {...bucket, key: prefix + (file.webkitRelativePath || file.name)}}))
+    try {
+      const conflicts = await inspectUploads(client, targets, controller.signal)
+      if (controller.signal.aborted) return
+      if (conflicts.length) setReview({targets, conflicts})
+      else enqueue(targets)
+    } catch (error) {
+      if (!controller.signal.aborted) setError(error)
+    } finally {
+      if (preflight.current === controller) {
+        preflight.current = null
+        setChecking(false)
+      }
+    }
   }
+
+  const conflictedIndices = new Set(review?.conflicts.map(conflict => conflict.index))
+  const ready = review?.targets.filter((_, index) => !conflictedIndices.has(index)) ?? []
 
   return <>
     <header className="title object-title">
@@ -82,8 +111,9 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
       <div className="actions">
         {source.capabilities.policy && <button onClick={() => setPolicy(true)}>Bucket policy</button>}
         {source.capabilities.upload && <>
-          <button onClick={() => folderInput.current?.click()}>Upload folder</button>
-          <button className="primary" onClick={() => fileInput.current?.click()}>Upload files</button>
+          <button onClick={() => setFolder(true)}>Create folder</button>
+          <button disabled={checking} onClick={() => folderInput.current?.click()}>Upload folder</button>
+          <button className="primary" disabled={checking} onClick={() => fileInput.current?.click()}>Upload files</button>
           <input hidden type="file" multiple ref={fileInput} onChange={event => addFiles(event.currentTarget)} />
           <input hidden type="file" multiple ref={node => {
             folderInput.current = node
@@ -128,6 +158,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
     {failures.length > 0 && <ul className="feedback error" role="alert">{failures.map(entry =>
       <li key={entry.key}><span className="key">{entry.key}</span> · {entry.error}</li>)}</ul>}
     {error !== undefined && <Failure error={error} />}
+    {checking && <p className="feedback" role="status">Checking upload destinations…</p>}
     {query.error && <Failure error={query.error} retry={() => void query.refetch()} />}
     <table className="objects">
       <thead><tr>
@@ -167,7 +198,7 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
     {query.isSuccess && visible.length === 0 && <div className="empty">
       <strong>{search ? 'No matching keys in the loaded pages' : 'This prefix is empty'}</strong>
       {search ? <button className="plain" onClick={() => setSearch('')}>Clear filter</button> :
-        source.capabilities.upload && <button className="plain" onClick={() => fileInput.current?.click()}>Choose files to upload</button>}
+        source.capabilities.upload && <button className="plain" disabled={checking} onClick={() => fileInput.current?.click()}>Choose files to upload</button>}
     </div>}
     <footer className="table-foot">
       {query.hasNextPage && <span>Filter and sort cover only loaded pages.</span>}
@@ -182,7 +213,46 @@ export function Objects({source, bucket, client, csrfToken, enqueue}: {
       <a className="external" href={link.url} target="_blank" rel="noopener noreferrer">Open public URL ↗</a>
     </Modal>}
     {policy && <Policy {...{bucket, client}} close={() => setPolicy(false)} />}
+    {folder && <CreateFolder {...{bucket, client, prefix}} close={() => setFolder(false)} created={() => {
+      setFolder(false)
+      refresh()
+    }} />}
+    {review && <UploadConflicts client={client} conflicts={review.conflicts} occupiedKeys={ready.map(row => row.object.key)}
+      close={() => setReview(undefined)} confirm={resolutions => {
+        setReview(undefined)
+        enqueue([...ready, ...resolutions.map(({index, object, replace}) => ({file: review.targets[index].file, object, replace}))])
+      }} />}
   </>
+}
+
+function CreateFolder({bucket, client, prefix, close, created}: {
+  bucket: Bucket; client: Client; prefix: string; close: () => void; created: () => void;
+}) {
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>()
+  return <Modal title="Create folder" close={close} canClose={() => !busy}>
+    <p className="object-key key">{bucket.bucket}/{prefix}{name.trim() && name.trim() + '/'}</p>
+    <form className="bucket-form" onSubmit={async event => {
+      event.preventDefault()
+      if (busy) return
+      const folderName = name.trim()
+      if (!folderName || folderName === '.' || folderName === '..' || /[/\\\x00-\x1f\x7f]/.test(folderName)) {
+        setError(new Error('Enter a folder name without slashes or control characters.'))
+        return
+      }
+      setBusy(true)
+      setError(undefined)
+      try { await client.createFolder(bucket, prefix, folderName); created() }
+      catch (error) { setError(error) }
+      finally { setBusy(false) }
+    }}>
+      <label htmlFor="folder-name">Folder name</label>
+      <input id="folder-name" value={name} onChange={event => setName(event.target.value)} disabled={busy} required autoFocus />
+      {error !== undefined && <Failure error={error} />}
+      <button className="primary" disabled={busy}>{busy ? 'Creating…' : 'Create folder'}</button>
+    </form>
+  </Modal>
 }
 
 function Policy({bucket, client, close}: {bucket: Bucket; client: Client; close: () => void}) {

@@ -13,11 +13,12 @@ func (a *API) start(w http.ResponseWriter, r *http.Request, actor service.Actor)
 	var body struct {
 		Size        int64
 		ContentType string
+		CreateOnly  bool
 	}
 	if err := decodeJSON(w, r, 8192, &body); err != nil {
 		return err
 	}
-	upload, err := a.backend.StartUpload(r.Context(), actor, refFrom(r), body.ContentType, body.Size)
+	upload, err := a.backend.StartUploadWithPolicy(r.Context(), actor, refFrom(r), body.ContentType, body.Size, body.CreateOnly)
 	if err != nil {
 		return err
 	}

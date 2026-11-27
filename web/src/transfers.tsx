@@ -1,7 +1,9 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Client, ObjectRef, Upload } from './api'
 import { HTTPError } from './api'
 import { formatBytes } from './format'
+import { Failure } from './detail'
+import { suggestUploadName, UploadConflicts, type UploadConflict, type UploadTarget } from './upload-conflicts'
 
 type Transfer = {
   token: string
@@ -10,10 +12,11 @@ type Transfer = {
   size: number
   lastModified: number
   singlePut?: boolean
+  replace?: boolean
   id?: string
   fingerprints?: Record<number, string>
   sent: number
-  status: 'queued' | 'uploading' | 'paused' | 'complete' | 'failed'
+  status: 'queued' | 'uploading' | 'paused' | 'complete' | 'failed' | 'conflict'
   message?: string
 }
 
@@ -27,7 +30,7 @@ export function useTransfers(client: Client, subject: string, refresh: (object: 
   const [rows, setRows] = useState<Transfer[]>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(storageKey) || '[]') as Transfer[]
-      return saved.map(row => ({...row, status: 'paused'}))
+      return saved.map(row => ({...row, status: row.status === 'conflict' ? 'conflict' : 'paused'}))
     } catch {
       return []
     }
@@ -36,11 +39,20 @@ export function useTransfers(client: Client, subject: string, refresh: (object: 
   const files = useRef(new Map<string, File>())
   const running = useRef<{ token: string; controller: AbortController } | null>(null)
   const storageWarning = useRef(false)
+  const stopped = useRef(false)
+
+  useEffect(() => {
+    stopped.current = false
+    return () => {
+      stopped.current = true
+      running.current?.controller.abort()
+    }
+  }, [])
 
   function store(next: Transfer[]) {
     latest.current = next
     try {
-      localStorage.setItem(storageKey, JSON.stringify(next.filter(row => row.status !== 'complete' && row.id)))
+      localStorage.setItem(storageKey, JSON.stringify(next.filter(row => row.status !== 'complete' && (row.status !== 'failed' || row.id))))
     } catch {
       storageWarning.current = true
     }
@@ -52,7 +64,7 @@ export function useTransfers(client: Client, subject: string, refresh: (object: 
   }
 
   async function pump() {
-    if (running.current) return
+    if (running.current || stopped.current) return
     const row = latest.current.find(row => row.status === 'queued')
     if (!row) return
     const file = files.current.get(row.token)
@@ -64,9 +76,9 @@ export function useTransfers(client: Client, subject: string, refresh: (object: 
     set({status: 'uploading', message: undefined})
     try {
       if (row.singlePut || file.size === 0) {
-        await client.putObject(row.object, file, signal)
+        await client.putObject(row.object, file, !row.replace, signal)
       } else {
-        const session = row.id ? await client.upload(row.id, signal) : await client.start(row.object, file, signal)
+        const session = row.id ? await client.upload(row.id, signal) : await client.start(row.object, file, !row.replace, signal)
         set({id: session.id})
         if (session.status !== 'complete' && session.status !== 'completed') {
           await transferParts(row, file, session, signal, set)
@@ -77,8 +89,10 @@ export function useTransfers(client: Client, subject: string, refresh: (object: 
       refresh(row.object)
     } catch (error) {
       const failed = error instanceof HTTPError && [400, 403, 404, 410].includes(error.status)
+      const conflict = error instanceof HTTPError && error.code === 'object_exists'
+      if (error instanceof HTTPError && error.status === 401) stopped.current = true
       set({
-        status: failed ? 'failed' : 'paused',
+        status: conflict ? 'conflict' : failed ? 'failed' : 'paused',
         message: signal.aborted ? undefined : error instanceof TypeError ? 'Connection interrupted. Resume to continue.' :
           error instanceof Error ? error.message : 'Transfer interrupted',
       })
@@ -119,10 +133,10 @@ export function useTransfers(client: Client, subject: string, refresh: (object: 
     await client.complete(session.id, signal)
   }
 
-  function enqueue(objects: {file: File; object: ObjectRef}[], singlePut: boolean) {
-    const queued = objects.map(({file, object}): Transfer => {
+  function enqueue(objects: UploadTarget[], singlePut: boolean) {
+    const queued = objects.map(({file, object, replace}): Transfer => {
       const token = crypto.randomUUID()
-      const row = {token, object, name: file.name, size: file.size, lastModified: file.lastModified, sent: 0, singlePut}
+      const row = {token, object, name: file.name, size: file.size, lastModified: file.lastModified, sent: 0, singlePut, replace}
       const maxSinglePutBytes = 64 * 1024 * 1024
       if (singlePut && file.size > maxSinglePutBytes) {
         return {...row, status: 'failed', message: 'This source accepts files up to ' + formatBytes(maxSinglePutBytes) + '.'}
@@ -142,26 +156,46 @@ export function useTransfers(client: Client, subject: string, refresh: (object: 
       return
     }
     files.current.set(row.token, file)
+    if (row.status === 'conflict') {
+      update(row.token, {message: 'An object already exists at this destination.'})
+      return
+    }
+    stopped.current = false
     update(row.token, {status: 'queued', message: undefined})
     void pump()
   }
 
-  async function discard(row: Transfer) {
+  async function abortUnfinished(row: Transfer) {
     if (row.id && row.status !== 'complete') {
       try {
         await client.abort(row.id)
       } catch (error) {
-        if (!(error instanceof HTTPError) || ![404, 410].includes(error.status)) {
-          update(row.token, {message: error instanceof Error ? error.message : 'Could not abort transfer'})
-          return
-        }
+        if (!(error instanceof HTTPError) || ![404, 410].includes(error.status)) throw error
       }
     }
+  }
+
+  function removeRow(row: Transfer) {
     files.current.delete(row.token)
     store(latest.current.filter(entry => entry.token !== row.token))
   }
 
-  return {rows, enqueue, resume, discard, storageWarning: storageWarning.current, hasFile: (token: string) => files.current.has(token),
+  async function discard(row: Transfer) {
+    try { await abortUnfinished(row); removeRow(row) }
+    catch (error) { update(row.token, {message: error instanceof Error ? error.message : 'Could not abort transfer'}) }
+  }
+
+  async function resolve(row: Transfer, resolution?: {object: ObjectRef; replace: boolean}) {
+    await abortUnfinished(row)
+    if (!resolution) {
+      removeRow(row)
+      return
+    }
+    update(row.token, {...resolution, id: undefined, fingerprints: undefined, sent: 0, status: 'queued', message: undefined})
+    void pump()
+  }
+
+  return {rows, enqueue, resume, discard, resolve, storageWarning: storageWarning.current, hasFile: (token: string) => files.current.has(token),
     pause: (token: string) => {
       if (running.current?.token === token) running.current.controller.abort()
       else update(token, {status: 'paused'})
@@ -169,10 +203,14 @@ export function useTransfers(client: Client, subject: string, refresh: (object: 
   }
 }
 
-export function Transfers({transfers}: {transfers: ReturnType<typeof useTransfers>}) {
+export function Transfers({client, transfers}: {client: Client; transfers: ReturnType<typeof useTransfers>}) {
+  const [review, setReview] = useState<{row: Transfer; conflict: UploadConflict; occupied: string[]}>()
+  const [checking, setChecking] = useState(false)
+  const [error, setError] = useState<unknown>()
   return <section aria-label="Transfers">
     {transfers.storageWarning && <p className="error" role="alert">Browser storage is unavailable. Keep this page open to resume transfers.</p>}
     {transfers.rows.length === 0 && <div className="empty">No uploads in this browser.</div>}
+    {error !== undefined && <Failure error={error} />}
     <ul className="transfer-list">
       {transfers.rows.map(row => <li key={row.token}>
         <div className="transfer-target">
@@ -188,8 +226,20 @@ export function Transfers({transfers}: {transfers: ReturnType<typeof useTransfer
           {['queued', 'uploading'].includes(row.status) ?
             <button onClick={() => transfers.pause(row.token)}>Pause</button> :
             <>
-              {row.status === 'paused' && (transfers.hasFile(row.token) ?
-                <button onClick={() => transfers.resume(row)}>Resume</button> :
+              {(row.status === 'paused' || row.status === 'conflict') && (transfers.hasFile(row.token) ?
+                row.status === 'paused' ? <button onClick={() => transfers.resume(row)}>Resume</button> :
+                  <button disabled={checking} onClick={async () => {
+                    setChecking(true)
+                    setError(undefined)
+                    try {
+                      const occupied = transfers.rows.filter(other => other.token !== row.token &&
+                        other.status !== 'complete' && other.object.source === row.object.source && other.object.bucket === row.object.bucket)
+                        .map(other => other.object.key)
+                      const suggestion = await suggestUploadName(client, row.object, new Set(occupied))
+                      setReview({row, occupied, conflict: {index: 0, object: row.object, suggestion, canReplace: !occupied.includes(row.object.key)}})
+                    } catch (error) { setError(error) }
+                    finally { setChecking(false) }
+                  }}>Review conflict</button> :
                 <label className="button pick-file">Reselect file<input type="file" onChange={event => {
                   const file = event.currentTarget.files?.[0]
                   event.currentTarget.value = ''
@@ -202,5 +252,10 @@ export function Transfers({transfers}: {transfers: ReturnType<typeof useTransfer
         </div>
       </li>)}
     </ul>
+    {review && <UploadConflicts client={client} conflicts={[review.conflict]} occupiedKeys={review.occupied}
+      close={() => setReview(undefined)} confirm={async resolutions => {
+        await transfers.resolve(review.row, resolutions[0])
+        setReview(undefined)
+      }} />}
   </section>
 }
