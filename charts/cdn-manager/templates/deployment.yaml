@@ -85,6 +85,13 @@ spec:
               value: ":9090"
             - name: GOMEMLIMIT
               value: {{ .Values.goMemLimit | quote }}
+            {{- with .Values.config.auth.mcpBrokerKeyEnv }}
+            - name: {{ . | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.existingSecret | quote }}
+                  key: {{ . | quote }}
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ required "existingSecret names the Secret that supplies OIDC and S3 credentials" .Values.existingSecret }}
@@ -95,7 +102,7 @@ spec:
               containerPort: 9090
           startupProbe:
             httpGet:
-              path: /readyz
+              path: /livez
               port: metrics
             periodSeconds: 2
             failureThreshold: 30

@@ -36,10 +36,10 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [url, clientId, issuer, metadataUrl, scopes]
+                required: [url, issuer, metadataUrl, scopes]
                 properties:
                   url: { type: string, format: uri }
-                  clientId: { type: string }
+                  clientId: { type: string, description: Pre-registered client ID used by external OAuth deployments. }
                   issuer: { type: string, format: uri }
                   metadataUrl: { type: string, format: uri }
                   scopes:

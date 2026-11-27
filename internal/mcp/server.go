@@ -44,6 +44,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := s.provider.AuthorizeMCP(r)
 	if err != nil {
+		if errors.Is(err, auth.ErrStoreUnavailable) {
+			http.Error(w, "Authentication temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		s.provider.Challenge(w, r, "")
 		return
 	}

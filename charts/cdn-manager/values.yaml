@@ -14,7 +14,7 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-# This Secret supplies OIDC, S3 credentials, and the Redis connection URL.
+# This Secret supplies OIDC, S3, Redis, and optional MCP broker credentials.
 existingSecret: cdn-manager-credentials
 config:
   auth:

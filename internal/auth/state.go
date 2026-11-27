@@ -46,19 +46,23 @@ func newToken() string {
 }
 
 func (s *expiringStore[T]) issue(ctx context.Context, value T, until time.Time, replaces, match string) (string, error) {
-	if !time.Now().Before(until) {
-		return "", ErrUnauthorized
-	}
 	id := newToken()
+	if err := s.put(ctx, id, value, until, replaces, match); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func (s *expiringStore[T]) put(ctx context.Context, id string, value T, until time.Time, replaces, match string) error {
+	if !time.Now().Before(until) {
+		return ErrUnauthorized
+	}
 	hash := sha256.Sum256([]byte(id))
 	replaced := sha256.Sum256([]byte(replaces))
 	item := entry[T]{Value: value, Expires: until, match: sha256.Sum256([]byte(match))}
 	replace := len(replaces) == tokenLength
 	if s.redis != nil {
-		if err := s.issueRedis(ctx, hash, replaced, replace, item); err != nil {
-			return "", err
-		}
-		return id, nil
+		return s.issueRedis(ctx, hash, replaced, replace, item)
 	}
 
 	s.mu.Lock()
@@ -76,14 +80,14 @@ func (s *expiringStore[T]) issue(ctx context.Context, value T, until time.Time, 
 	if _, exists := s.entries[replaced]; replace && exists {
 		count--
 	}
-	if count >= s.limit || !now.Before(until) {
-		return "", ErrStoreUnavailable
+	if _, exists := s.entries[hash]; exists || count >= s.limit || !now.Before(until) {
+		return ErrStoreUnavailable
 	}
 	if replace {
 		delete(s.entries, replaced)
 	}
 	s.entries[hash] = item
-	return id, nil
+	return nil
 }
 
 func (s *expiringStore[T]) get(ctx context.Context, id, match string, consume bool) (T, error) {
@@ -92,6 +96,11 @@ func (s *expiringStore[T]) get(ctx context.Context, id, match string, consume bo
 		return empty, ErrUnauthorized
 	}
 	hash := sha256.Sum256([]byte(id))
+	return s.getHashed(ctx, hash, match, consume)
+}
+
+func (s *expiringStore[T]) getHashed(ctx context.Context, hash [sha256.Size]byte, match string, consume bool) (T, error) {
+	var empty T
 	expected := sha256.Sum256([]byte(match))
 	if s.redis != nil {
 		return s.getRedis(ctx, hash, expected, consume)

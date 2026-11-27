@@ -1,7 +1,7 @@
 export type Capabilities = Partial<Record<'createBucket' | 'deleteBucket' | 'policy' | 'upload' | 'multipart' | 'delete' | 'presign' | 'editText' | 'versions' | 'metadata', boolean>>
 export type Source = { id: string; label?: string; region?: string; health?: string; capabilities: Capabilities }
 export type Session = { subject: string; name?: string; csrfToken: string }
-export type MCPConnection = { url: string; clientId: string; issuer: string; metadataUrl: string; scopes: string[] }
+export type MCPConnection = { url: string; clientId?: string; issuer: string; metadataUrl: string; scopes: string[] }
 export type Bucket = { source: string; bucket: string }
 export type ObjectRef = Bucket & { key: string; versionId?: string }
 export type ObjectInfo = { key: string; size: number; lastModified?: string; etag?: string; contentType?: string; metadata?: Record<string, string> }
