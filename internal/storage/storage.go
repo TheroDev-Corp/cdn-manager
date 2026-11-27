@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -69,13 +68,18 @@ type Source struct {
 }
 
 type Store struct {
-	sources  map[string]*Source
-	stateDir string
-	mu       sync.Mutex
-	active   map[string]*uploadActivity
+	sources       map[string]*Source
+	spoolDir      string
+	uploads       uploadJournal
+	sharedUploads bool
 }
 
 func New(configs []SourceConfig, stateDir string) (*Store, error) {
+	journal := &fileUploadJournal{dir: stateDir, active: make(map[string]*uploadActivity)}
+	return newStore(configs, stateDir, journal, false)
+}
+
+func newStore(configs []SourceConfig, stateDir string, journal uploadJournal, shared bool) (*Store, error) {
 	if stateDir == "" {
 		return nil, fmt.Errorf("upload state directory: %w", ErrInvalid)
 	}
@@ -99,7 +103,7 @@ func New(configs []SourceConfig, stateDir string) (*Store, error) {
 			}
 		}
 	}
-	store := &Store{sources: make(map[string]*Source, len(configs)), stateDir: stateDir, active: make(map[string]*uploadActivity)}
+	store := &Store{sources: make(map[string]*Source, len(configs)), spoolDir: stateDir, uploads: journal, sharedUploads: shared}
 	globalTransfers := make(chan struct{}, 4)
 	links := make(map[string]struct{})
 	for _, config := range configs {

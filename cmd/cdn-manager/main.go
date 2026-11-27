@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -25,16 +26,93 @@ import (
 	"github.com/TheroDev-Corp/cdn-manager/internal/telemetry"
 	"github.com/TheroDev-Corp/cdn-manager/web"
 	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, logger); err != nil {
+	if err := runCommand(ctx, logger, os.Args[1:]); err != nil {
 		logger.Error("manager stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func runCommand(ctx context.Context, logger *slog.Logger, args []string) error {
+	if len(args) == 0 {
+		return run(ctx, logger)
+	}
+	if len(args) != 2 || args[0] != "import-file-state" {
+		return errors.New("usage: cdn-manager [import-file-state LEGACY_STATE_DIRECTORY]")
+	}
+	dir := args[1]
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("open legacy state directory: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("legacy state path must be a directory")
+	}
+	lock, err := lockState(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	client, err := openRedis(ctx)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	prefix, err := redisPrefix()
+	if err != nil {
+		return err
+	}
+	imported, err := storage.ImportFileUploads(ctx, dir, client, prefix)
+	if err != nil {
+		return err
+	}
+	logger.Info("legacy upload journal imported", "records", imported)
+	return nil
+}
+
+func openRedis(ctx context.Context) (*redis.Client, error) {
+	url := setting("CDN_MANAGER_REDIS_URL", "")
+	if url == "" {
+		return nil, errors.New("CDN_MANAGER_REDIS_URL is required for Redis state")
+	}
+	cfg, err := redis.ParseURL(url)
+	if err != nil {
+		return nil, errors.New("invalid CDN_MANAGER_REDIS_URL")
+	}
+	// A lost reply has an unknown outcome. Automatic retries are
+	// inappropriate for consuming login state and claiming leases.
+	cfg.MaxRetries = -1
+	cfg.ContextTimeoutEnabled = true
+	cfg.DialTimeout = 3 * time.Second
+	cfg.ReadTimeout = 2 * time.Second
+	cfg.WriteTimeout = 2 * time.Second
+	cfg.PoolTimeout = 2 * time.Second
+	cfg.MaxActiveConns = 16
+	cfg.DisableIdentity = true
+	client := redis.NewClient(cfg)
+	check, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := client.Ping(check).Err(); err != nil {
+		client.Close()
+		return nil, errors.New("connect to Redis")
+	}
+	return client, nil
+}
+
+func redisPrefix() (string, error) {
+	prefix := setting("CDN_MANAGER_REDIS_PREFIX", "cdn-manager")
+	if len(prefix) > 64 || strings.ContainsFunc(prefix, func(ch rune) bool {
+		return ch != '-' && ch != '_' && ch != '.' && (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9')
+	}) {
+		return "", errors.New("CDN_MANAGER_REDIS_PREFIX must contain at most 64 lowercase letters, digits, dots, underscores, or hyphens")
+	}
+	return prefix, nil
 }
 
 func run(ctx context.Context, logger *slog.Logger) error {
@@ -50,7 +128,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	mode := setting("CDN_MANAGER_STATE_MODE", "file")
 	stateDir := setting("CDN_MANAGER_STATE_DIR", ".cdn-manager")
+	var client *redis.Client
+	var prefix string
+	switch mode {
+	case "file":
+		if setting("CDN_MANAGER_REDIS_URL", "") != "" {
+			return errors.New("set CDN_MANAGER_STATE_MODE=redis to use CDN_MANAGER_REDIS_URL")
+		}
+	case "redis":
+		prefix, err = redisPrefix()
+		if err != nil {
+			return err
+		}
+		client, err = openRedis(ctx)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		stateDir = setting("CDN_MANAGER_SPOOL_DIR", ".cdn-manager-spool")
+	default:
+		return errors.New("CDN_MANAGER_STATE_MODE must be file or redis")
+	}
 	lock, err := lockState(stateDir)
 	if err != nil {
 		return err
@@ -61,7 +161,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	for i := range sources {
 		sources[i].Observe = metrics.ObserveS3
 	}
-	store, err := storage.New(sources, stateDir)
+	var store *storage.Store
+	if client == nil {
+		store, err = storage.New(sources, stateDir)
+	} else {
+		store, err = storage.NewRedis(sources, stateDir, client, prefix)
+		authSettings.Redis, authSettings.RedisPrefix = client, prefix
+	}
 	if err != nil {
 		return err
 	}
@@ -77,7 +183,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 75 * time.Second, MaxHeaderBytes: 64 << 10,
 	}
 	internal := &http.Server{
-		Addr: setting("CDN_MANAGER_INTERNAL_LISTEN", ":9090"), Handler: internalRoutes(backend, metrics),
+		Addr: setting("CDN_MANAGER_INTERNAL_LISTEN", ":9090"), Handler: internalRoutes(backend, metrics, client),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second,
 	}
 	publicListener, err := net.Listen("tcp", public.Addr)
@@ -193,11 +299,21 @@ func publicRoutes(backend *service.Backend, provider *auth.Provider, metrics *te
 	return router
 }
 
-func internalRoutes(backend *service.Backend, metrics *telemetry.Metrics) http.Handler {
+func internalRoutes(backend *service.Backend, metrics *telemetry.Metrics, client *redis.Client) http.Handler {
 	router := http.NewServeMux()
 	ok := func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok\n") }
 	router.HandleFunc("GET /livez", ok)
-	router.HandleFunc("GET /readyz", ok)
+	router.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if client != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 800*time.Millisecond)
+			defer cancel()
+			if err := client.Ping(ctx).Err(); err != nil {
+				http.Error(w, "shared state unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		ok(w, r)
+	})
 	router.Handle("GET /metrics", metrics.Handler())
 	router.HandleFunc("GET /sources/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

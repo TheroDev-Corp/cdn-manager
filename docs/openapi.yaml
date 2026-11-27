@@ -7,6 +7,8 @@ info:
     to obtain the CSRF token. The API authorizes every operation against the
     selected source, bucket allowlist, provider capabilities, and role.
     All source, bucket, key, and version selectors are case-sensitive.
+    Browser authentication and multipart upload operations can return 503 when
+    the configured shared state store is temporarily unavailable.
 servers:
   - url: /
 security:
