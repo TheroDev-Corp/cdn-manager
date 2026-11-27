@@ -243,21 +243,18 @@ async function mcpClient(accessToken: string) {
   }
 }
 
-async function verifyBrokerClient(page: Page, mode: 'DCR' | 'CIMD', redirect: string) {
+async function verifyBrokerClient(page: Page, redirect: string) {
   const protectedResource = await (await page.request.get('/.well-known/oauth-protected-resource/mcp')).json()
   const metadata = await (await page.request.get('/.well-known/oauth-authorization-server/mcp/auth')).json()
   expect(metadata.issuer).toBe(protectedResource.authorization_servers[0])
-  expect(metadata.client_id_metadata_document_supported).toBe(true)
+  expect(metadata.client_id_metadata_document_supported).toBeUndefined()
 
-  let clientID = 'https://vscode.dev/oauth/client-metadata.json'
-  if (mode === 'DCR') {
-    const registration = await page.request.post(metadata.registration_endpoint, {data: {
-      client_name: 'Demo MCP client', application_type: 'native', token_endpoint_auth_method: 'none',
-      redirect_uris: ['http://127.0.0.1:61233/oauth/callback'], grant_types: ['authorization_code', 'refresh_token'],
-    }})
-    expect(registration.status()).toBe(201)
-    clientID = (await registration.json()).client_id
-  }
+  const registration = await page.request.post(metadata.registration_endpoint, {data: {
+    client_name: 'Demo MCP client', application_type: 'native', token_endpoint_auth_method: 'none',
+    redirect_uris: ['http://127.0.0.1:61233/oauth/callback'], grant_types: ['authorization_code', 'refresh_token'],
+  }})
+  expect(registration.status()).toBe(201)
+  const clientID = (await registration.json()).client_id
   const verifier = randomBytes(32).toString('base64url')
   const consentURL = new URL(metadata.authorization_endpoint)
   consentURL.search = new URLSearchParams({
@@ -293,21 +290,19 @@ async function verifyBrokerClient(page: Page, mode: 'DCR' | 'CIMD', redirect: st
   expect((await rpc(mcpHeaders(access.access_token), 'initialize', initialize, 1)).status).toBe(401)
 }
 
-for (const mode of ['DCR', 'CIMD'] as const) {
-  test(`connects an MCP client through ${mode} and the existing OIDC login`, async ({page}) => {
-    test.skip(process.env.CDN_TEST_MCP_BROKER !== '1', 'Enable the MCP broker in the demo manager first.')
-    const receiver = createServer((_, response) => response.end('OAuth callback received'))
-    receiver.listen(0, '127.0.0.1')
-    await once(receiver, 'listening')
-    try {
-      const port = (receiver.address() as {port: number}).port
-      await verifyBrokerClient(page, mode, `http://127.0.0.1:${port}${mode === 'DCR' ? '/oauth/callback' : '/'}`)
-    } finally {
-      receiver.close()
-      receiver.closeAllConnections()
-    }
-  })
-}
+test('connects an MCP client through DCR and the existing OIDC login', async ({page}) => {
+  test.skip(process.env.CDN_TEST_MCP_BROKER !== '1', 'Enable the MCP broker in the demo manager first.')
+  const receiver = createServer((_, response) => response.end('OAuth callback received'))
+  receiver.listen(0, '127.0.0.1')
+  await once(receiver, 'listening')
+  try {
+    const port = (receiver.address() as {port: number}).port
+    await verifyBrokerClient(page, `http://127.0.0.1:${port}/oauth/callback`)
+  } finally {
+    receiver.close()
+    receiver.closeAllConnections()
+  }
+})
 
 test('shows MCP connection values from the manager and protects the settings with SSO', async ({page, request}) => {
   expect((await request.get('/api/v1/mcp-settings')).status()).toBe(401)

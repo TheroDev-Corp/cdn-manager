@@ -83,6 +83,9 @@ type brokerTokenResponse struct {
 }
 
 func (b *mcpBroker) exchangeCode(ctx context.Context, raw, clientID, redirect, verifier string) (brokerTokenResponse, error) {
+	if !strings.HasPrefix(clientID, registeredClientPrefix) {
+		return brokerTokenResponse{}, ErrUnauthorized
+	}
 	code, err := b.codes.get(ctx, raw, "", false)
 	if err != nil {
 		return brokerTokenResponse{}, err
@@ -148,7 +151,7 @@ func minTime(a, b time.Time) time.Time {
 
 func (b *mcpBroker) rotate(ctx context.Context, presented, clientID, requested string) (brokerTokenResponse, error) {
 	raw, ok := strings.CutPrefix(presented, brokerRefreshPrefix)
-	if !ok {
+	if !ok || !strings.HasPrefix(clientID, registeredClientPrefix) {
 		return brokerTokenResponse{}, ErrUnauthorized
 	}
 	previous, err := b.refreshHistory.get(ctx, raw, "", false)
@@ -232,7 +235,7 @@ func (b *mcpBroker) accessToken(ctx context.Context, presented string) (AccessTo
 	if err != nil {
 		return AccessToken{}, err
 	}
-	if grant.Resource != b.provider.mcpAudience {
+	if grant.Resource != b.provider.mcpAudience || !strings.HasPrefix(grant.ClientID, registeredClientPrefix) {
 		return AccessToken{}, ErrUnauthorized
 	}
 	session, err := b.provider.sessions.getHashed(ctx, grant.Session, "", false)

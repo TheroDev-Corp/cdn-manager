@@ -26,7 +26,6 @@ const (
 type mcpBroker struct {
 	provider       *Provider
 	key            []byte
-	metadataClient *http.Client
 	requests       expiringStore[brokerRequest]
 	codes          expiringStore[brokerCode]
 	grants         expiringStore[brokerGrant]
@@ -62,7 +61,7 @@ type brokerToken struct {
 
 func newMCPBroker(p *Provider, cfg Config) *mcpBroker {
 	return &mcpBroker{
-		provider: p, key: slices.Clone(cfg.MCPBrokerKey), metadataClient: publicMetadataClient(),
+		provider: p, key: slices.Clone(cfg.MCPBrokerKey),
 		requests:       newExpiringStore[brokerRequest](cfg.Redis, cfg.RedisPrefix, "mcp-request", 4096),
 		codes:          newExpiringStore[brokerCode](cfg.Redis, cfg.RedisPrefix, "mcp-code", 4096),
 		grants:         newExpiringStore[brokerGrant](cfg.Redis, cfg.RedisPrefix, "mcp-grant", 8192),
@@ -125,7 +124,6 @@ func (b *mcpBroker) metadata(w http.ResponseWriter, _ *http.Request) {
 		"token_endpoint_auth_methods_supported":          []string{"none"},
 		"revocation_endpoint_auth_methods_supported":     []string{"none"},
 		"authorization_response_iss_parameter_supported": true,
-		"client_id_metadata_document_supported":          true,
 		"scopes_supported":                               b.provider.mcpScopes,
 	})
 }
@@ -149,7 +147,7 @@ func (b *mcpBroker) authorize(w http.ResponseWriter, r *http.Request) {
 		brokerError(w, http.StatusBadRequest, "invalid_target")
 		return
 	}
-	client, err := b.client(r.Context(), q.Get("client_id"))
+	client, err := b.client(q.Get("client_id"))
 	if err != nil || !client.acceptsRedirect(q.Get("redirect_uri")) {
 		brokerError(w, http.StatusBadRequest, "invalid_request")
 		return
@@ -232,7 +230,7 @@ func (b *mcpBroker) consent(w http.ResponseWriter, r *http.Request) {
 		id = r.PostForm.Get("request")
 	}
 	request, err := b.requests.get(r.Context(), id, "", false)
-	if err != nil || request.Resource != b.provider.mcpAudience {
+	if err != nil || request.Resource != b.provider.mcpAudience || !strings.HasPrefix(request.ClientID, registeredClientPrefix) {
 		http.Error(w, "MCP authorization request is unavailable", http.StatusBadRequest)
 		return
 	}
