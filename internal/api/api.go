@@ -73,6 +73,10 @@ func Mount(router chi.Router, backend *service.Backend, auth WebAuth) {
 func (a *API) handle(run action) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		actor, csrf, err := a.auth.Web(r)
+		if errors.Is(err, auth.ErrStoreUnavailable) {
+			writeFailure(w, err)
+			return
+		}
 		if err != nil || actor.Subject == "" {
 			writeError(w, http.StatusUnauthorized, "Sign in to continue.")
 			return
@@ -101,6 +105,10 @@ func (a *API) handle(run action) http.HandlerFunc {
 
 func (a *API) session(w http.ResponseWriter, r *http.Request) {
 	actor, csrf, err := a.auth.Web(r)
+	if errors.Is(err, auth.ErrStoreUnavailable) {
+		writeFailure(w, err)
+		return
+	}
 	if err != nil || actor.Subject == "" {
 		writeError(w, http.StatusUnauthorized, "Sign in to continue.")
 		return
@@ -179,6 +187,10 @@ func writeFailure(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnprocessableEntity, "This operation is unavailable for the selected resource.")
 	case errors.Is(err, storage.ErrTooLarge):
 		writeError(w, http.StatusRequestEntityTooLarge, "The request exceeds the size limit.")
+	case errors.Is(err, auth.ErrStoreUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "Session verification is temporarily unavailable.")
+	case errors.Is(err, storage.ErrJournalUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "Upload state is temporarily unavailable.")
 	case errors.Is(err, storage.ErrBusy):
 		w.Header().Set("Retry-After", "2")
 		writeError(w, http.StatusTooManyRequests, "The transfer is busy. Try again shortly.")

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"slices"
 	"time"
@@ -18,9 +19,9 @@ type UploadGrant struct {
 	Size     int64
 }
 
-func (p *Provider) IssueUploadGrant(token AccessToken, id string, part int32, size int64, uploadExpiry time.Time) (string, time.Time, bool) {
+func (p *Provider) IssueUploadGrant(ctx context.Context, token AccessToken, id string, part int32, size int64, uploadExpiry time.Time) (string, time.Time, error) {
 	if token.Actor.Subject == "" || !slices.Contains(token.Actor.Scopes, service.Write) {
-		return "", time.Time{}, false
+		return "", time.Time{}, ErrUnauthorized
 	}
 	expires := time.Now().Add(uploadGrantTTL)
 	for _, deadline := range []time.Time{token.Expires, uploadExpiry} {
@@ -32,14 +33,13 @@ func (p *Provider) IssueUploadGrant(token AccessToken, id string, part int32, si
 	// credential originally granted broader permissions.
 	actor := token.Actor
 	actor.Scopes = []string{service.Write}
-	grant, ok := p.uploadGrants.issue(UploadGrant{Actor: actor, UploadID: id, Number: part, Size: size}, expires)
-	return grant, expires.UTC(), ok
+	grant, err := p.uploadGrants.issue(ctx, UploadGrant{Actor: actor, UploadID: id, Number: part, Size: size}, expires, "", "")
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return grant, expires.UTC(), nil
 }
 
 func (p *Provider) UploadGrant(r *http.Request) (UploadGrant, error) {
-	value, ok := p.uploadGrants.get(bearerToken(r), nil)
-	if !ok {
-		return UploadGrant{}, ErrUnauthorized
-	}
-	return value, nil
+	return p.uploadGrants.get(r.Context(), bearerToken(r), "", false)
 }

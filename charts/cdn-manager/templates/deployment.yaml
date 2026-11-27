@@ -1,3 +1,4 @@
+{{- $redis := eq .Values.state.mode "redis" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,9 +6,13 @@ metadata:
   labels:
     {{- include "cdn-manager.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
+  minReadySeconds: 5
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       {{- include "cdn-manager.selectorLabels" . | nindent 6 }}
@@ -17,9 +22,23 @@ spec:
         {{- include "cdn-manager.labels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.podScrape.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+        {{- end }}
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 35
+      {{- if $redis }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "cdn-manager.selectorLabels" . | nindent 18 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: {{ .Values.podSecurityContext.runAsUser }}
@@ -44,8 +63,22 @@ spec:
           env:
             - name: CDN_MANAGER_CONFIG
               value: /etc/cdn-manager/config.json
+            - name: CDN_MANAGER_STATE_MODE
+              value: {{ .Values.state.mode | quote }}
+            {{- if $redis }}
+            - name: CDN_MANAGER_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "existingSecret must supply the Redis connection URL" .Values.existingSecret | quote }}
+                  key: {{ required "state.redisSecretKey is required with Redis" .Values.state.redisSecretKey | quote }}
+            - name: CDN_MANAGER_REDIS_PREFIX
+              value: {{ include "cdn-manager.redisPrefix" . | quote }}
+            - name: CDN_MANAGER_SPOOL_DIR
+              value: /var/lib/cdn-manager
+            {{- else }}
             - name: CDN_MANAGER_STATE_DIR
               value: /var/lib/cdn-manager
+            {{- end }}
             - name: CDN_MANAGER_LISTEN
               value: ":8080"
             - name: CDN_MANAGER_INTERNAL_LISTEN
@@ -89,5 +122,10 @@ spec:
           configMap:
             name: {{ include "cdn-manager.fullname" . }}
         - name: state
+          {{- if $redis }}
+          emptyDir:
+            sizeLimit: {{ .Values.state.spoolSize | quote }}
+          {{- else }}
           persistentVolumeClaim:
             claimName: {{ .Values.persistence.existingClaim | default (include "cdn-manager.fullname" .) }}
+          {{- end }}

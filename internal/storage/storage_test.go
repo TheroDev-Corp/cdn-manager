@@ -141,7 +141,7 @@ func TestS3Integration(t *testing.T) {
 	}
 
 	// Simulate the provider committing before the process can persist the success.
-	record, err := store.readUpload(upload.ID)
+	record, err := store.uploads.read(ctx, upload.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,19 +205,19 @@ func TestS3Integration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record, err := store.readUpload(upload.ID)
+		record, err := store.uploads.read(ctx, upload.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _, _ = source.client.AbortMultipartUpload(context.Background(), record.abortRequest()) })
 		record.ExpiresAt = time.Now().Add(-time.Hour)
-		if err := store.saveUpload(record); err != nil {
+		if err := store.uploads.(*fileUploadJournal).save(ctx, record); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.Sweep(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.readUpload(upload.ID); !errors.Is(err, ErrNotFound) {
+		if _, err := store.uploads.read(ctx, upload.ID); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expired session retained: %v", err)
 		}
 		if _, err := source.listUploadParts(ctx, record); !errorCode(err, "NoSuchUpload") {

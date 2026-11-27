@@ -9,6 +9,7 @@ services:
         condition: service_healthy
     environment:
       CDN_MANAGER_CONFIG: /demo/config.json
+      CDN_MANAGER_STATE_MODE: file
       CDN_MANAGER_STATE_DIR: /var/lib/cdn-manager
       GOMEMLIMIT: 40MiB
       DEMO_OIDC_SECRET: only-for-local-demo
