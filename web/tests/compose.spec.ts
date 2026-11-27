@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { appendFile, mkdir, stat, truncate, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
 import { join, resolve } from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
 
@@ -235,6 +237,72 @@ async function mcpClient(accessToken: string) {
     const {result} = await message(await rpc(headers, 'tools/call', {name, arguments: args}, 2))
     return result
   }
+}
+
+async function verifyBrokerClient(page: Page, mode: 'DCR' | 'CIMD', redirect: string) {
+  const protectedResource = await (await page.request.get('/.well-known/oauth-protected-resource/mcp')).json()
+  const metadata = await (await page.request.get('/.well-known/oauth-authorization-server/mcp/auth')).json()
+  expect(metadata.issuer).toBe(protectedResource.authorization_servers[0])
+  expect(metadata.client_id_metadata_document_supported).toBe(true)
+
+  let clientID = 'https://vscode.dev/oauth/client-metadata.json'
+  if (mode === 'DCR') {
+    const registration = await page.request.post(metadata.registration_endpoint, {data: {
+      client_name: 'Demo MCP client', application_type: 'native', token_endpoint_auth_method: 'none',
+      redirect_uris: ['http://127.0.0.1:61233/oauth/callback'], grant_types: ['authorization_code', 'refresh_token'],
+    }})
+    expect(registration.status()).toBe(201)
+    clientID = (await registration.json()).client_id
+  }
+  const verifier = randomBytes(32).toString('base64url')
+  const consentURL = new URL(metadata.authorization_endpoint)
+  consentURL.search = new URLSearchParams({
+    response_type: 'code', client_id: clientID, redirect_uri: redirect, resource: protectedResource.resource, scope: 'read write',
+    state: 'broker-fixture', code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256',
+  }).toString()
+  await page.goto(consentURL.href)
+  await page.getByRole('button', {name: 'Demo Owner'}).click()
+  await expect(page.getByRole('heading', {name: /^Allow .+ to connect\?$/})).toBeVisible()
+  await expect(page.getByRole('checkbox', {name: 'Write and upload objects'})).not.toBeChecked()
+  const [approval] = await Promise.all([
+    page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/mcp/auth/consent'),
+    page.getByRole('button', {name: 'Allow access'}).click(),
+  ])
+  expect(approval.status()).toBe(303)
+  await page.waitForURL(`${redirect}**`)
+  const callback = new URL(page.url())
+  expect(callback.searchParams.get('state')).toBe('broker-fixture')
+  expect(callback.searchParams.get('iss')).toBe(metadata.issuer)
+
+  const exchange = await page.request.post(metadata.token_endpoint, {form: {
+    grant_type: 'authorization_code', client_id: clientID, code: callback.searchParams.get('code')!, redirect_uri: redirect,
+    code_verifier: verifier, resource: protectedResource.resource,
+  }})
+  expect(exchange.status()).toBe(200)
+  const access = await exchange.json()
+  expect(access.scope).toBe('read')
+  const invoke = await mcpClient(access.access_token)
+  expect(JSON.stringify(toolOutput(await invoke('list_sources', {})))).toContain('assets')
+
+  const session = await (await page.request.get('/api/v1/session')).json()
+  expect((await page.request.post('/auth/logout', {headers: {'X-CSRF-Token': session.csrfToken}})).status()).toBe(204)
+  expect((await rpc(mcpHeaders(access.access_token), 'initialize', initialize, 1)).status).toBe(401)
+}
+
+for (const mode of ['DCR', 'CIMD'] as const) {
+  test(`connects an MCP client through ${mode} and the existing OIDC login`, async ({page}) => {
+    test.skip(process.env.CDN_TEST_MCP_BROKER !== '1', 'Enable the MCP broker in the demo manager first.')
+    const receiver = createServer((_, response) => response.end('OAuth callback received'))
+    receiver.listen(0, '127.0.0.1')
+    await once(receiver, 'listening')
+    try {
+      const port = (receiver.address() as {port: number}).port
+      await verifyBrokerClient(page, mode, `http://127.0.0.1:${port}${mode === 'DCR' ? '/oauth/callback' : '/'}`)
+    } finally {
+      receiver.close()
+      receiver.closeAllConnections()
+    }
+  })
 }
 
 test('shows MCP connection values from the manager and protects the settings with SSO', async ({page, request}) => {

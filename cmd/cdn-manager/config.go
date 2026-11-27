@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ type authConfig struct {
 	MCPIssuer              string
 	MCPAudience            string
 	MCPScopes              []string
+	MCPBrokerKeyEnv        string
 	SessionTTL             string
 	AllowInsecureLocalhost bool
 }
@@ -54,6 +56,14 @@ func readConfig(path string) (config, error) {
 
 func (cfg authConfig) provider() (auth.Config, error) {
 	var ttl time.Duration
+	var brokerKey []byte
+	if cfg.MCPBrokerKeyEnv != "" {
+		var err error
+		brokerKey, err = base64.StdEncoding.DecodeString(os.Getenv(cfg.MCPBrokerKeyEnv))
+		if err != nil || len(brokerKey) != 32 {
+			return auth.Config{}, errors.New("auth.mcpBrokerKeyEnv must name a base64-encoded 32-byte key")
+		}
+	}
 	if cfg.SessionTTL != "" {
 		var err error
 		ttl, err = time.ParseDuration(cfg.SessionTTL)
@@ -64,7 +74,7 @@ func (cfg authConfig) provider() (auth.Config, error) {
 	return auth.Config{
 		PublicURL: cfg.PublicURL, OIDCIssuer: cfg.OIDCIssuer, OIDCClientID: cfg.OIDCClientID,
 		OIDCClientSecret: os.Getenv(cfg.OIDCClientSecretEnv), MCPIssuer: cfg.MCPIssuer, MCPAudience: cfg.MCPAudience,
-		MCPScopes: cfg.MCPScopes, SessionTTL: ttl, AllowInsecureLocalhost: cfg.AllowInsecureLocalhost,
+		MCPScopes: cfg.MCPScopes, MCPBrokerKey: brokerKey, SessionTTL: ttl, AllowInsecureLocalhost: cfg.AllowInsecureLocalhost,
 	}, nil
 }
 

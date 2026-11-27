@@ -25,7 +25,7 @@ The example CDN listens on port 8081. **Assets** uses the root path and **Media*
 2. Select **Copy command** and run the command in Bash or zsh with a compatible Node.js version. The demo flow was verified with Node.js 24.22.1 and MCP Inspector 2.16.0.
 3. Follow Inspector's browser sign-in prompt and choose **Demo Owner** for Compose or your usual account for an Authentik deployment. The client performs the OAuth exchange and calls `list_sources` to display the sources your account can access.
 
-The settings panel also shows the endpoint, Streamable HTTP transport, and registered OAuth client ID. Expand **OAuth discovery details** for the issuer, protected resource metadata URL, and supported scopes. [Register the OAuth clients and connect Inspector through Authentik](docs/mcp-authentik.md).
+The settings panel shows the endpoint, Streamable HTTP transport, and any pre-registered OAuth client ID. Expand **OAuth discovery details** for the issuer, protected resource metadata URL, and supported scopes. [Configure MCP OAuth with Authentik](docs/mcp-authentik.md).
 
 <img src="docs/screenshots/mcp-settings.webp" width="650" alt="MCP Settings with a copyable Inspector command, the demo endpoint and client ID, and expanded OAuth discovery details">
 
@@ -47,6 +47,7 @@ Set `CDN_MANAGER_CONFIG` to a JSON file. See the [Compose example](e2e/demo/conf
 | --- | --- |
 | `auth.publicUrl` | HTTPS origin of the manager. Register the exact origin plus `/auth/callback` as the web OAuth redirect URI. |
 | `auth.oidcIssuer`, `oidcClientId`, `oidcClientSecretEnv` | Web OIDC provider, client ID, and client secret environment variable. The ID token must include the user's `groups` claim. |
+| `auth.mcpBrokerKeyEnv` | Enables built-in MCP OAuth. Names a secret environment variable containing a random 32-byte key in standard base64. Use the same key and Redis state on all replicas. |
 | `auth.sessionTtl` | Lifetime of the manager's web session after OIDC sign-in, with a default of `8h`. Group membership is read at sign-in. |
 | `auth.mcpIssuer`, `mcpAudience`, `mcpScopes` | MCP issuer, dedicated OAuth client ID used as the audience, and allowed scopes such as `read`, `write`, and `delete`. |
 | `sources[].id`, `endpoint`, `region`, `pathStyle`, `buckets` | Stable ID, S3 endpoint, signing region, addressing style, and explicit bucket allowlist. |

@@ -1,4 +1,16 @@
-# Connect MCP Inspector through Authentik
+# Connect MCP clients through Authentik
+
+## Built-in OAuth broker
+
+Enable the broker by setting `auth.mcpBrokerKeyEnv` to the name of a secret environment variable containing 32 random bytes encoded in standard base64. Use the same value on both replicas and keep Redis state shared. The chart consumes the existing credential Secret. Keep the browser OIDC application with its existing `/auth/callback` and `groups` mapping. The broker reuses that sign-in and asks for a separate MCP consent. Authentik needs no callback from individual MCP clients.
+
+In a client that supports remote HTTP and MCP OAuth discovery, add the `/mcp` endpoint URL. The broker uses public Authorization Code clients with S256 PKCE, accepts HTTPS and native HTTP loopback redirects, and enforces exact redirect matching apart from the loopback port. It supports Client ID Metadata Documents over public HTTPS and stateless Dynamic Client Registration for older clients. The issuer is `/mcp/auth` on the configured public origin. Its tokens work only on that origin's `/mcp` resource. An explicit request for a different resource is rejected. Clients that omit the indicator use the issuer's sole MCP resource.
+
+Consent starts with read access when the client requested it. A user must explicitly grant write or delete, and the user's existing source roles still apply. Public clients that declare refresh support receive rotating refresh tokens. A grant lasts at most `auth.sessionTtl` and also ends when its originating web session ends. Use the broker's revocation endpoint to end an individual grant. A reused refresh token revokes its grant.
+
+The broker is opt-in. Before switching in production, verify clean Codex, VS Code and Inspector profiles with an endpoint-only configuration against a staged instance. Use the same browser OIDC subject and roles as the existing installation. Retain the previous `mcpIssuer` and `mcpAudience` values for rollback by clearing `mcpBrokerKeyEnv`. Existing external MCP tokens need reauthorization after switching. Once the rollout is verified, remove per-client Authentik callbacks and client overrides that were used for the external MCP provider.
+
+## External OAuth provider
 
 Use a dedicated Authentik OAuth2/OpenID provider and application for the MCP endpoint. The browser UI uses a separate confidential provider. Enable the Authorization Code grant explicitly on both providers. Set both providers to the same stable Subject Mode, such as hashed user ID, so the same user can resume an upload from either interface. Select an asymmetric signing key and enable inclusion of scope claims in tokens. [Authentik OAuth2 provider](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/)
 

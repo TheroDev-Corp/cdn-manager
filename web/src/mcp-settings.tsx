@@ -44,7 +44,8 @@ export function MCPSettings({close}: {close: () => void}) {
   const settings = query.data
   const inspectorCommand = settings && [
     'npx @modelcontextprotocol/inspector@2.16.0 --cli', shellArg(settings.url),
-    '--transport http --protocol-era modern --client-id', shellArg(settings.clientId),
+    '--transport http --protocol-era modern',
+    ...(settings.clientId ? ['--client-id', shellArg(settings.clientId)] : []),
     '--method tools/call --tool-name list_sources',
   ].join(' ')
 
@@ -58,7 +59,7 @@ export function MCPSettings({close}: {close: () => void}) {
           <CopyValue label="MCP endpoint" value={settings.url} action="Copy endpoint" />
           <dl>
             <div><dt>Transport</dt><dd>Streamable HTTP</dd></div>
-            <div><dt>OAuth client ID</dt><dd><code className="key">{settings.clientId}</code></dd></div>
+            {settings.clientId && <div><dt>OAuth client ID</dt><dd><code className="key">{settings.clientId}</code></dd></div>}
           </dl>
         </section>
         <section className="mcp-inspector" aria-label="Connect with MCP Inspector">

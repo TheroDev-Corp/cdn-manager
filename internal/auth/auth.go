@@ -40,6 +40,7 @@ type Config struct {
 	MCPIssuer              string
 	MCPAudience            string
 	MCPScopes              []string
+	MCPBrokerKey           []byte
 	SessionTTL             time.Duration
 	AllowInsecureLocalhost bool
 	Redis                  redis.UniversalClient
@@ -57,6 +58,7 @@ type Provider struct {
 	logins                            expiringStore[login]
 	sessions                          expiringStore[session]
 	uploadGrants                      expiringStore[UploadGrant]
+	broker                            *mcpBroker
 }
 
 func New(ctx context.Context, cfg Config) (*Provider, error) {
@@ -72,7 +74,10 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if cfg.MCPIssuer == "" {
 		cfg.MCPIssuer = cfg.OIDCIssuer
 	}
-	if cfg.MCPAudience == "" || cfg.MCPAudience == cfg.OIDCClientID {
+	if len(cfg.MCPBrokerKey) != 0 && len(cfg.MCPBrokerKey) != 32 {
+		return nil, errors.New("MCP OAuth broker key must contain 32 bytes")
+	}
+	if len(cfg.MCPBrokerKey) == 0 && (cfg.MCPAudience == "" || cfg.MCPAudience == cfg.OIDCClientID) {
 		return nil, errors.New("MCP OAuth requires a named audience distinct from the web OIDC client ID")
 	}
 	if len(cfg.MCPScopes) == 0 {
@@ -104,14 +109,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("discover web OIDC provider: %w", err)
 	}
-	mcpProvider := webProvider
-	if cfg.MCPIssuer != cfg.OIDCIssuer {
-		mcpProvider, err = discover(ctx, cfg.MCPIssuer, allowHTTP)
-		if err != nil {
-			return nil, fmt.Errorf("discover MCP OAuth provider: %w", err)
-		}
-	}
-	return &Provider{
+	p := &Provider{
 		publicURL:     public.String(),
 		mcpIssuer:     cfg.MCPIssuer,
 		mcpAudience:   cfg.MCPAudience,
@@ -125,11 +123,25 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 			Scopes: []string{oidc.ScopeOpenID, "profile"},
 		},
 		webVerifier:  webProvider.VerifierContext(ctx, &oidc.Config{ClientID: cfg.OIDCClientID}),
-		mcpVerifier:  mcpProvider.VerifierContext(ctx, &oidc.Config{ClientID: cfg.MCPAudience}),
 		logins:       newExpiringStore[login](cfg.Redis, cfg.RedisPrefix, "login", 4096),
 		sessions:     newExpiringStore[session](cfg.Redis, cfg.RedisPrefix, "session", 8192),
 		uploadGrants: newExpiringStore[UploadGrant](cfg.Redis, cfg.RedisPrefix, "grant", 8192),
-	}, nil
+	}
+	if len(cfg.MCPBrokerKey) != 0 {
+		p.mcpIssuer = p.publicURL + MCPBrokerPath
+		p.mcpAudience = p.publicURL + MCPPath
+		p.broker = newMCPBroker(p, cfg)
+	} else {
+		mcpProvider := webProvider
+		if cfg.MCPIssuer != cfg.OIDCIssuer {
+			mcpProvider, err = discover(ctx, cfg.MCPIssuer, allowHTTP)
+			if err != nil {
+				return nil, fmt.Errorf("discover MCP OAuth provider: %w", err)
+			}
+		}
+		p.mcpVerifier = mcpProvider.VerifierContext(ctx, &oidc.Config{ClientID: cfg.MCPAudience})
+	}
+	return p, nil
 }
 
 func providerURL(raw string, allowLoopback bool) (*url.URL, error) {
@@ -186,16 +198,20 @@ func (p *Provider) PublicURL() string { return p.publicURL }
 // MCPConnection contains the non-secret values needed to configure an MCP client.
 type MCPConnection struct {
 	URL         string   `json:"url"`
-	ClientID    string   `json:"clientId"`
+	ClientID    string   `json:"clientId,omitempty"`
 	Issuer      string   `json:"issuer"`
 	MetadataURL string   `json:"metadataUrl"`
 	Scopes      []string `json:"scopes"`
 }
 
 func (p *Provider) MCPConnection() MCPConnection {
+	clientID := p.mcpAudience
+	if p.broker != nil {
+		clientID = ""
+	}
 	return MCPConnection{
 		URL:         p.publicURL + MCPPath,
-		ClientID:    p.mcpAudience,
+		ClientID:    clientID,
 		Issuer:      p.mcpIssuer,
 		MetadataURL: p.publicURL + MetadataPath,
 		Scopes:      slices.Clone(p.mcpScopes),
@@ -212,6 +228,9 @@ func (p *Provider) AuthorizeMCP(r *http.Request) (AccessToken, error) {
 	raw := bearerToken(r)
 	if raw == "" || len(raw) > 16<<10 {
 		return AccessToken{}, ErrUnauthorized
+	}
+	if p.broker != nil {
+		return p.broker.accessToken(r.Context(), raw)
 	}
 	ctx := oidc.ClientContext(r.Context(), p.httpClient)
 	verified, err := p.mcpVerifier.Verify(ctx, raw)
@@ -287,6 +306,9 @@ func (p *Provider) Challenge(w http.ResponseWriter, r *http.Request, requiredSco
 }
 
 func (p *Provider) Metadata(w http.ResponseWriter, _ *http.Request) {
+	if p.broker != nil {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Resource               string   `json:"resource"`

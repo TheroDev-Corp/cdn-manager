@@ -59,11 +59,16 @@ func runCommand(ctx context.Context, logger *slog.Logger, args []string) error {
 		return err
 	}
 	defer lock.Close()
-	client, err := openRedis(ctx)
+	client, err := openRedis()
 	if err != nil {
 		return err
 	}
 	defer client.Close()
+	check, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	if err := client.Ping(check).Err(); err != nil {
+		return errors.New("connect to Redis")
+	}
 	prefix, err := redisPrefix()
 	if err != nil {
 		return err
@@ -76,7 +81,7 @@ func runCommand(ctx context.Context, logger *slog.Logger, args []string) error {
 	return nil
 }
 
-func openRedis(ctx context.Context) (*redis.Client, error) {
+func openRedis() (*redis.Client, error) {
 	url := setting("CDN_MANAGER_REDIS_URL", "")
 	if url == "" {
 		return nil, errors.New("CDN_MANAGER_REDIS_URL is required for Redis state")
@@ -95,14 +100,9 @@ func openRedis(ctx context.Context) (*redis.Client, error) {
 	cfg.PoolTimeout = 2 * time.Second
 	cfg.MaxActiveConns = 16
 	cfg.DisableIdentity = true
-	client := redis.NewClient(cfg)
-	check, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := client.Ping(check).Err(); err != nil {
-		client.Close()
-		return nil, errors.New("connect to Redis")
-	}
-	return client, nil
+	// Redis availability is checked by readiness while serving. A temporary
+	// connection failure must not terminate a new replica during rollout.
+	return redis.NewClient(cfg), nil
 }
 
 func redisPrefix() (string, error) {
@@ -142,7 +142,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		client, err = openRedis(ctx)
+		client, err = openRedis()
 		if err != nil {
 			return err
 		}
@@ -277,6 +277,7 @@ func publicRoutes(backend *service.Backend, provider *auth.Provider, metrics *te
 	router.Get("/auth/callback", provider.Callback)
 	router.Post("/auth/logout", provider.Logout)
 	router.Get(auth.MetadataPath, provider.Metadata)
+	provider.MountMCPBroker(router)
 	mcpServer := mcp.New(backend, provider)
 	router.Handle(auth.MCPPath, mcpServer)
 	router.Put(mcp.TransferPath, mcpServer.Transfer)

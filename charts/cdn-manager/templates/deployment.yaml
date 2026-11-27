@@ -95,7 +95,7 @@ spec:
               containerPort: 9090
           startupProbe:
             httpGet:
-              path: /readyz
+              path: /livez
               port: metrics
             periodSeconds: 2
             failureThreshold: 30

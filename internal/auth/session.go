@@ -11,8 +11,9 @@ import (
 )
 
 type login struct {
-	Nonce    string
-	Verifier string
+	Nonce      string
+	Verifier   string
+	MCPConsent string `json:",omitempty"`
 }
 
 type session struct {
@@ -47,6 +48,13 @@ func (p *Provider) Login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	state := newToken()
 	transaction := login{Nonce: newToken(), Verifier: oauth2.GenerateVerifier()}
+	if consent := r.URL.Query().Get("mcp_consent"); p.broker != nil && consent != "" {
+		if _, err := p.broker.requests.get(r.Context(), consent, "", false); err != nil {
+			http.Error(w, "MCP authorization request is unavailable", http.StatusBadRequest)
+			return
+		}
+		transaction.MCPConsent = consent
+	}
 	id, err := p.logins.issue(r.Context(), transaction, time.Now().Add(loginTTL), p.cookie(r, "login"), state)
 	if err != nil {
 		http.Error(w, "Sign-in temporarily unavailable", http.StatusServiceUnavailable)
@@ -107,6 +115,10 @@ func (p *Provider) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.setCookie(w, "session", id, int(p.sessionTTL.Seconds()))
+	if transaction.MCPConsent != "" && p.broker != nil {
+		http.Redirect(w, r, MCPBrokerPath+"/consent?request="+transaction.MCPConsent, http.StatusSeeOther)
+		return
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
