@@ -20,6 +20,38 @@ function Brand() {
   return <div className="brand"><span className="brand-mark" aria-hidden="true"><i /><i /><i /></span><strong>CDN Manager</strong></div>
 }
 
+function ThemeToggle() {
+  const root = document.documentElement
+  const [theme, setTheme] = useState(root.dataset.theme)
+  const [systemDark, setSystemDark] = useState(() => matchMedia('(prefers-color-scheme: dark)').matches)
+  useEffect(() => {
+    const media = matchMedia('(prefers-color-scheme: dark)')
+    const update = () => setSystemDark(media.matches)
+    media.addEventListener('change', update)
+    update()
+    return () => media.removeEventListener('change', update)
+  }, [])
+
+  const dark = theme === 'dark' || (!theme && systemDark)
+  const label = dark ? 'Switch to light theme' : 'Switch to dark theme'
+  function toggle() {
+    const next = dark ? 'light' : 'dark'
+    setTheme(next)
+    root.dataset.theme = next
+    try { localStorage.setItem('cdn-manager.theme', next) }
+    catch { /* The current page still reflects the choice. */ }
+  }
+
+  return <button className="theme-toggle" type="button" aria-label={label} title={label} onClick={toggle}>
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
+      {dark ? <>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2" />
+      </> : <path d="M20.8 15.2A8.7 8.7 0 0 1 8.8 3.2a8.8 8.8 0 1 0 12 12Z" />}
+    </svg>
+  </button>
+}
+
 function App() {
   const cache = useQueryClient()
   const session = useQuery({queryKey: ['session'], queryFn: async () => {
@@ -35,6 +67,7 @@ function App() {
   if (session.data && !needsLogin) return <Workspace key={session.data.subject} session={session.data} />
   return <main className="entry">
     <Brand />
+    <ThemeToggle />
     <div className="entry-card">
       {session.isPending ? <p role="status">Checking session…</p> : needsLogin ? <>
         <h1>Sign in to CDN Manager</h1>
@@ -113,6 +146,7 @@ function Workspace({session}: {session: Session}) {
         <button className="mcp-trigger" aria-label="MCP Settings" aria-haspopup="dialog" onClick={() => setMcpSettings(true)}>
           MCP<span className="mcp-label"> Settings</span>
         </button>
+        <ThemeToggle />
       </div>
     </header>
     <aside className="sources" aria-label="Storage scope">
