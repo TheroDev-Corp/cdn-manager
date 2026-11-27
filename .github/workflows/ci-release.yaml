@@ -1,0 +1,267 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/therodev-corp/cdn-manager
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - name: Build and type-check the embedded web app
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Check Go, REST contract, and OAuth
+        run: |
+          go mod tidy -diff
+          go vet ./...
+          go test -race ./...
+      - name: Render the chart and validate dashboard JSON
+        run: |
+          helm lint charts/cdn-manager
+          helm template cdn-manager charts/cdn-manager --namespace fixture --set ingress.enabled=true --set ingress.tlsSecretName=fixture-tls --set serviceMonitor.enabled=true --set persistence.existingClaim=cdn-manager-state >/tmp/manifests.yaml
+          for dashboard in observability/grafana/*.json; do
+            jq -e '.uid and (.panels | length > 0)' "$dashboard"
+          done
+      - name: Install browser and media test dependencies
+        working-directory: web
+        run: |
+          bunx playwright install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Test the browser UI
+        working-directory: web
+        run: bun run test:browser tests/manager.spec.ts tests/mcp-settings.spec.ts
+      - name: Start the disposable Compose fixture
+        run: docker compose up -d --build --wait --wait-timeout 180
+      - name: Check the running container identity and filesystem
+        run: |
+          curl --fail --silent --show-error --retry 15 --retry-connrefused --retry-delay 1 --output /dev/null http://127.0.0.1:8080/
+          manager=$(docker compose ps -q manager)
+          test "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$manager")" = true
+          docker top "$manager" -eo pid,uid,gid,comm |
+            awk '$2 == 65534 && $3 == 65534 && $4 == "cdn-manager" { found = 1 } END { exit !found }'
+          docker compose exec -T issuer bun -e \
+            'const response = await fetch("http://127.0.0.1:9090/readyz"); if (!response.ok) process.exit(1)'
+      - name: Verify S3 operations on Garage
+        env:
+          CDN_MANAGER_TEST_S3_REGION: example
+          CDN_MANAGER_TEST_S3_BUCKET: assets
+          CDN_MANAGER_TEST_S3_CONDITIONAL_WRITES: ignored
+        run: |
+          garage_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(docker compose ps -q garage)")
+          export CDN_MANAGER_TEST_S3_ENDPOINT="http://$garage_ip:3900"
+          CDN_MANAGER_TEST_S3_ACCESS_KEY=$(docker compose config --format json | jq -er '.services.manager.environment.DEMO_ACCESS_KEY')
+          CDN_MANAGER_TEST_S3_SECRET_KEY=$(docker compose config --format json | jq -er '.services.manager.environment.DEMO_SECRET_KEY')
+          export CDN_MANAGER_TEST_S3_ACCESS_KEY CDN_MANAGER_TEST_S3_SECRET_KEY
+          go test -count=1 -race -run TestS3Integration ./internal/storage
+      - name: Run end-to-end tests against Compose
+        working-directory: web
+        env:
+          CDN_TEST_BASE_URL: http://127.0.0.1:8080
+        run: bun run test:browser tests/compose.spec.ts --workers=1
+      - name: Print fixture logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Remove the disposable fixture
+        if: always()
+        run: docker compose down --volumes
+
+  image:
+    runs-on: ubuntu-24.04
+    outputs:
+      release-version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v4
+        if: github.ref_type == 'tag'
+        with:
+          version: v3.19.0
+      - name: Validate the release tag and package the chart
+        if: github.ref_type == 'tag'
+        id: version
+        run: |
+          if [[ ! $GITHUB_REF_NAME =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'Expected a stable vX.Y.Z release tag.' >&2
+            exit 1
+          fi
+          version=${GITHUB_REF_NAME#v}
+          chart=$(helm show chart charts/cdn-manager)
+          chart_version=$(awk '$1 == "version:" {print $2}' <<< "$chart")
+          app_version=$(awk '$1 == "appVersion:" {print $2}' <<< "$chart" | tr -d '"')
+          if [[ $version != "$chart_version" ]] || [[ $version != "$app_version" ]]; then
+            echo "Expected the chart version and appVersion to match $version." >&2
+            exit 1
+          fi
+          helm package charts/cdn-manager --destination dist
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=${{ runner.temp }}/cdn-manager.oci.tar
+          provenance: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Install OCI image tooling
+        run: |
+          if ! command -v skopeo >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y skopeo
+          fi
+      - name: Verify both platforms and their scratch runtime
+        shell: bash
+        run: |
+          image="oci-archive:$RUNNER_TEMP/cdn-manager.oci.tar"
+          skopeo inspect --raw "$image" | jq -e '
+            .mediaType == "application/vnd.oci.image.index.v1+json" and
+            ([.manifests[].platform | .os + "/" + .architecture] | sort) == ["linux/amd64", "linux/arm64"]'
+          for arch in amd64 arm64; do
+            skopeo --override-os linux --override-arch "$arch" inspect --config "$image" |
+              jq -e --arg arch "$arch" --arg revision "$GITHUB_SHA" '
+                .os == "linux" and .architecture == $arch and
+                .config.User == "65534:65534" and
+                .config.Entrypoint == ["/usr/local/bin/cdn-manager"] and
+                .config.Labels["org.opencontainers.image.revision"] == $revision and
+                (.rootfs.diff_ids | length) == 1'
+          done
+      - name: Export the dev images
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        run: |
+          for arch in amd64 arm64; do
+            archive="$RUNNER_TEMP/cdn-manager-linux-$arch.tar"
+            skopeo --override-os linux --override-arch "$arch" copy \
+              "oci-archive:$RUNNER_TEMP/cdn-manager.oci.tar" "docker-archive:$archive:cdn-manager:dev"
+            gzip "$archive"
+          done
+      - name: Upload the amd64 dev image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-manager-docker-linux-amd64
+          path: ${{ runner.temp }}/cdn-manager-linux-amd64.tar.gz
+          if-no-files-found: error
+          overwrite: true
+      - name: Upload the arm64 dev image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-manager-docker-linux-arm64
+          path: ${{ runner.temp }}/cdn-manager-linux-arm64.tar.gz
+          if-no-files-found: error
+          overwrite: true
+      - name: Upload the verified OCI image
+        if: github.event_name == 'push' && github.repository == 'TheroDev-Corp/cdn-manager'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-manager-oci-image
+          path: ${{ runner.temp }}/cdn-manager.oci.tar
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+          compression-level: 0
+      - name: Upload the packaged release chart
+        if: steps.version.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdn-manager-release-chart
+          path: dist/*.tgz
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    if: github.event_name == 'push' && github.repository == 'TheroDev-Corp/cdn-manager'
+    needs: [checks, image]
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: ghcr-publish-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cdn-manager-oci-image
+          path: ${{ runner.temp }}
+      - name: Install OCI image tooling
+        run: |
+          if ! command -v skopeo >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y skopeo
+          fi
+      - name: Publish and verify the OCI image index
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.image.outputs.release-version }}
+        run: |
+          tags=("$GITHUB_REF_NAME")
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            test "v$RELEASE_VERSION" = "$GITHUB_REF_NAME"
+            tags+=("$RELEASE_VERSION")
+          else
+            [[ $GITHUB_REF_NAME == dev || $GITHUB_REF_NAME == main ]]
+            head_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha)
+            if [[ $head_sha != "$GITHUB_SHA" ]]; then
+              echo "The $GITHUB_REF_NAME branch moved to $head_sha. Skipping publication of $GITHUB_SHA."
+              exit 0
+            fi
+          fi
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          image="oci-archive:$RUNNER_TEMP/cdn-manager.oci.tar"
+          index_digest=$(skopeo inspect --raw "$image" | sha256sum)
+          for tag in "${tags[@]}"; do
+            destination="docker://$IMAGE_REPOSITORY:$tag"
+            skopeo copy --all --preserve-digests "$image" "$destination"
+            test "$(skopeo inspect --raw "$destination" | sha256sum)" = "$index_digest"
+          done
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [image, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cdn-manager-release-chart
+          path: dist
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - name: Publish the chart and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.image.outputs.release-version }}
+        run: |
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          package="dist/cdn-manager-$RELEASE_VERSION.tgz"
+          helm push "$package" oci://ghcr.io/therodev-corp/charts
+          gh release create "$GITHUB_REF_NAME" "$package" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

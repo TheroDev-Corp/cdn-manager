@@ -1,0 +1,11 @@
+.git
+.agents
+.aws
+.codex
+.taste-skill
+.cdn-manager
+e2e/artifacts
+**/node_modules
+**/dist
+**/playwright-report
+**/test-results

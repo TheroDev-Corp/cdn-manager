@@ -1,0 +1,76 @@
+.mcp-settings {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.dialog:has(.mcp-settings) { scroll-padding-block-start: 76px }
+
+.dialog:has(.mcp-settings) > header {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+}
+
+.mcp-connection, .mcp-inspector, .mcp-discovery {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.mcp-inspector {
+  display: grid;
+  gap: 8px;
+}
+
+.mcp-settings dl {
+  display: grid;
+  gap: 8px 24px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.mcp-settings dt { color: var(--muted); font-size: 13px }
+.mcp-settings dd { margin: 2px 0 0; overflow-wrap: anywhere }
+.mcp-copy label, .mcp-discovery summary { font-weight: 600 }
+
+.mcp-copy-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.mcp-copy-control textarea {
+  min-width: 0;
+  min-height: 36px;
+  max-height: 12em;
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 13px;
+  field-sizing: content;
+  resize: none;
+  overflow-wrap: anywhere;
+}
+
+.mcp-copy-control textarea.mcp-command {
+  min-height: 88px;
+  background: var(--raised);
+  resize: vertical;
+}
+
+.mcp-copy-feedback {
+  min-height: 20px;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.mcp-discovery summary { width: fit-content; cursor: pointer }
+.mcp-discovery dl { grid-template-columns: minmax(0, 1fr); margin-top: 10px }
+
+@media (max-width: 480px) {
+  .mcp-copy-control { grid-template-columns: minmax(0, 1fr) }
+  .mcp-copy-control button { min-height: 44px; justify-self: start }
+  .mcp-discovery summary { min-height: 44px; align-content: center }
+}

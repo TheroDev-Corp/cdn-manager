@@ -1,0 +1,74 @@
+image:
+  repository: ghcr.io/therodev-corp/cdn-manager
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# This Secret contains the environment variable names referenced under config.
+existingSecret: cdn-manager-credentials
+config:
+  auth:
+    publicUrl: https://manager.example.com
+    oidcIssuer: https://identity.example.com/application/o/cdn-web/
+    oidcClientId: example-web-client
+    oidcClientSecretEnv: OIDC_WEB_CLIENT_SECRET
+    mcpIssuer: https://identity.example.com/application/o/cdn-mcp/
+    mcpAudience: example-mcp-resource
+    mcpScopes: [read, write, delete]
+    sessionTtl: 8h
+  sources:
+    - id: example
+      label: Example source
+      endpoint: https://storage.example.com
+      region: example-region
+      buckets: [assets]
+      pathStyle: true
+      cdnUrl: https://files.example.com/{key}
+      accessKeyEnv: EXAMPLE_S3_ACCESS_KEY
+      secretKeyEnv: EXAMPLE_S3_SECRET_KEY
+      roles:
+        viewer: [example-viewers]
+        editor: [example-editors]
+        admin: [example-admins]
+      capabilities:
+        multipart: true
+
+persistence:
+  # One manager process needs exclusive access to the upload state directory.
+  existingClaim: ""
+  size: 2Gi
+  # Null uses the cluster default. An empty string disables dynamic provisioning.
+  storageClassName: null
+  accessMode: ReadWriteOnce
+  keep: true
+
+podSecurityContext:
+  # Keep the previous UID and GIDs when reusing a claim with state owned by that user.
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+
+service:
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: manager.example.com
+  tlsSecretName: ""
+
+serviceMonitor:
+  enabled: false
+  additionalLabels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 96Mi
+  limits:
+    cpu: "1"
+    memory: 256Mi
+goMemLimit: 160MiB

@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cdn-manager.fullname" . }}
+  labels:
+    {{- include "cdn-manager.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cdn-manager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cdn-manager.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.podSecurityContext.runAsUser }}
+        runAsGroup: {{ .Values.podSecurityContext.runAsGroup }}
+        fsGroup: {{ .Values.podSecurityContext.fsGroup }}
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: CDN_MANAGER_CONFIG
+              value: /etc/cdn-manager/config.json
+            - name: CDN_MANAGER_STATE_DIR
+              value: /var/lib/cdn-manager
+            - name: CDN_MANAGER_LISTEN
+              value: ":8080"
+            - name: CDN_MANAGER_INTERNAL_LISTEN
+              value: ":9090"
+            - name: GOMEMLIMIT
+              value: {{ .Values.goMemLimit | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ required "existingSecret names the Secret that supplies OIDC and S3 credentials" .Values.existingSecret }}
+          ports:
+            - name: web
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/cdn-manager
+              readOnly: true
+            - name: state
+              mountPath: /var/lib/cdn-manager
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "cdn-manager.fullname" . }}
+        - name: state
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "cdn-manager.fullname" .) }}
